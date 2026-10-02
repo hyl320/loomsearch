@@ -10,11 +10,13 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器。它的重�
 
 当前项目仍保留 `ThreadPool` 和异步 `Logger`，但主线从 `bench-pool`、`bench-log`、`grep` 升级为 `loomsearch index` 和 `loomsearch query`。
 
+另外新增了 SQLite FTS5 检索后端，和手写倒排索引并存，用于对比「自研 vs 工业级」实现。
+
 ## 架构
 
 ```text
 CLI
- ├── index
+ ├── index          (手写倒排索引)
  │    ├── DirectoryScanner
  │    ├── ThreadPool
  │    ├── FileProcessor
@@ -25,11 +27,22 @@ CLI
  └── query
       ├── IndexStore
       └── QueryEngine
+
+ ├── sqlite-index   (SQLite FTS5)
+ │    ├── DirectoryScanner
+ │    ├── ThreadPool
+ │    ├── 读原文
+ │    └── SqliteStore
+ │
+ └── sqlite-query
+      └── SqliteStore
 ```
 
 `index` 命令负责递归扫描目录，把每个支持的文件提交给线程池处理。worker 读取文件、分词并返回 `FileResult`。主线程拿到 future 后统一合并到 `InvertedIndex`，最后通过 `IndexStore` 保存到磁盘。
 
 `query` 命令负责加载磁盘索引，把输入关键词归一化后交给 `QueryEngine` 查询。多个关键词使用 AND 语义，只有同时包含所有关键词的文档才会返回。
+
+`sqlite-index` 复用同样的扫描和线程池，但 worker 只读原文、不做分词，主线程在一个事务里把全文插入 FTS5 表。`sqlite-query` 走 FTS5 的 `MATCH`，支持 BM25 排名、短语和前缀查询。
 
 ## 模块职责
 
@@ -40,6 +53,7 @@ CLI
 - `InvertedIndex`：维护 `keyword -> document list` 映射。
 - `IndexStore`：保存和加载索引文件。
 - `QueryEngine`：执行单关键词查询和多关键词 AND 查询。
+- `SqliteStore`：封装 SQLite FTS5 的建表、批量入库和 `MATCH` 查询，`path` 只存不索引、`content` 参与检索。
 - `Indexer`：编排扫描、线程池任务提交、结果收集、索引合并和统计。
 - `Logger`：记录索引任务开始、文件处理、失败、完成和耗时。
 
@@ -113,6 +127,8 @@ LOOMSEARCH_INDEX_V1
 
 保存时关键词和路径都会排序，保证文件内容稳定，方便调试和测试。第一版没有使用 SQLite、压缩或自定义二进制布局，因为当前目标是功能闭环和可解释性。
 
+SQLite 后端用 FTS5 虚拟表存储：`CREATE VIRTUAL TABLE documents USING fts5(path UNINDEXED, content)`。FTS5 自己维护词频和位置，因此能提供手写索引没有的 BM25 排名、短语和前缀查询。FTS5 的 posting 编码比文本格式更紧凑，索引体积更小。
+
 ## 错误处理
 
 目录不存在时，CLI 直接返回错误。
@@ -135,17 +151,15 @@ Logger 继续使用独立后台线程，不复用 `ThreadPool`。原因是日志
 
 ## 非目标
 
-第一版不做：
+手写倒排索引这条路径不做（FTS5 后端已经覆盖其中一部分能力）：
 
 - GUI。
 - HTTP 服务。
 - 模糊搜索。
-- BM25 或复杂排名。
 - 增量索引。
 - 文件监听。
 - 分布式索引。
 - 无锁队列。
-- 数据库。
 - 压缩索引格式。
 
 ## 取舍
@@ -161,6 +175,9 @@ Logger 继续使用独立后台线程，不复用 `ThreadPool`。原因是日志
 
 4. **为什么 Logger 不进线程池？**  
    线程池被文件处理任务占用时，日志仍需要稳定刷盘。独立 logger 线程能避免监控能力被业务任务拖住。
+
+5. **为什么同时保留手写索引和 SQLite FTS5？**  
+   两者回答不同问题：手写索引胜在无依赖、可解释、单条查询快（内存哈希查找）；FTS5 胜在构建更快、磁盘更小，并提供排名、短语和前缀查询。保留两者，benchmark 才能对比「自研轮子」和「工业级方案」的真实取舍，而不是把 SQLite 硬塞进一个没有动机的位置。
 
 ## 当前验证重点
 
@@ -191,6 +208,20 @@ bench_log:
 ```
 
 这组数字只用于记录本机量级。后续如果要写进简历，应在固定机器、固定编译配置和固定任务规模下重复采样。
+
+2026-10-02 在同一开发环境对比两个检索后端（`corpus-gen` 生成 2000 个合成文件、约 1.1 MB，4 线程，30 个查询）：
+
+```text
+hand_index_build_ms: 271
+sqlite_index_build_ms: 178
+hand_index_bytes: 3199272
+sqlite_index_bytes: 2056192
+hand_query_total_us: 28842
+sqlite_query_total_us: 165206
+parity_mismatches: 0
+```
+
+说明：手写后端的查询是内存热路径，SQLite 后端是磁盘上的 FTS5，所以单条查询前者快是预期结果；`parity_mismatches: 0` 说明两者在 ASCII 单词查询上返回相同结果集。
 
 ## 后续方向
 
