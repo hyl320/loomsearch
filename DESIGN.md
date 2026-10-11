@@ -8,9 +8,7 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器。它的重�
 扫描文件 -> 并发读取 -> 文本解析 -> 构建倒排索引 -> 查询
 ```
 
-当前项目仍保留 `ThreadPool` 和异步 `Logger`，但主线从 `bench-pool`、`bench-log`、`grep` 升级为 `loomsearch index` 和 `loomsearch query`。
-
-另外新增了 SQLite FTS5 检索后端，和手写倒排索引并存，用于对比「自研 vs 工业级」实现。
+主线命令是 `loomsearch index`、`loomsearch query`，以及 SQLite FTS5 后端的 `sqlite-index`、`sqlite-query`。`ThreadPool` 和异步 `Logger` 是支撑索引链路的基础组件。SQLite FTS5 后端与手写倒排索引并存，用于对比「自研 vs 工业级」实现。
 
 ## 架构
 
@@ -151,8 +149,6 @@ Logger 继续使用独立后台线程，不复用 `ThreadPool`。原因是日志
 
 ## 非目标
 
-手写倒排索引这条路径不做（FTS5 后端已经覆盖其中一部分能力）：
-
 - GUI。
 - HTTP 服务。
 - 模糊搜索。
@@ -191,25 +187,7 @@ Logger 继续使用独立后台线程，不复用 `ThreadPool`。原因是日志
 
 ## Benchmark 记录
 
-2026-09-16 在当前 Windows 开发环境运行了一组轻量 benchmark：
-
-```text
-处理器标识: Intel64 Family 6 Model 154 Stepping 3, GenuineIntel
-
-bench_pool:
-  thread_pool task_count=100000 thread_count=4 elapsed_ms=1759
-  std::async  task_count=100000 elapsed_ms=17988
-
-bench_log:
-  messages=1000000
-  submit_ms=1142
-  total_ms=1142
-  dropped=0
-```
-
-这组数字只用于记录本机量级。后续如果要写进简历，应在固定机器、固定编译配置和固定任务规模下重复采样。
-
-2026-10-02 在同一开发环境对比两个检索后端（`corpus-gen` 生成 2000 个合成文件、约 1.1 MB，4 线程，30 个查询）：
+2026-10-02 在当前开发环境对比两个检索后端（`corpus-gen` 生成 2000 个合成文件、约 1.1 MB，4 线程，30 个查询）：
 
 ```text
 hand_index_build_ms: 271

@@ -12,6 +12,9 @@ out/
 
 *.log
 *.bin
+*.db
+*.db-wal
+*.db-shm
 
 .vscode/
 .idea/

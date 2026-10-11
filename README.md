@@ -1,6 +1,6 @@
 # LoomSearch
 
-LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫描文件，并发读取和分词，构建倒排索引，然后从索引文件中查询关键词。
+LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫描目录，并发读取与分词，构建倒排索引，并从索引文件查询关键词。它同时内置 SQLite FTS5 作为第二个检索后端，用于对比「自研倒排索引」和「工业级 FTS5」的真实取舍。
 
 ## 支持范围
 
@@ -13,24 +13,40 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫�
 .hpp
 ```
 
-暂不做 GUI、HTTP 服务、模糊搜索、增量索引和文件监听。
-
-另外接入了 SQLite FTS5 作为第二个检索后端：在保留手写倒排索引的同时，用 FTS5 提供 BM25 排名、短语查询和前缀查询。
+不做 GUI、HTTP 服务、模糊搜索、增量索引和文件监听。
 
 ## 构建
+
+依赖：CMake >= 3.20、支持 C++20 的编译器（GCC / Clang / MSVC）、Ninja（可选）。GoogleTest 由 CMake `FetchContent` 自动拉取；SQLite 以官方 amalgamation 形式 vendor 在 `third_party/sqlite/`，构建无需联网（仅首次拉取 gtest 需要网络）。
 
 ```powershell
 cmake -S . -B build -DLOOMLOG_BUILD_CLI=ON
 cmake --build build
 ```
 
-生成的命令行程序位于：
+或使用 preset：`cmake --preset debug` / `cmake --preset release`（构建产物在 `out/build/<preset>`）。
+
+生成的可执行文件：
 
 ```text
-build\loomsearch.exe
+build\loomsearch.exe     # Windows
+build/loomsearch         # Linux / macOS
 ```
 
-## 使用
+## CLI 命令总览
+
+```text
+loomsearch index <目录> [--threads N] [--output PATH]        # 手写倒排索引
+loomsearch query <索引文件> <关键词...>                       # 多关键词 AND 查询
+loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 建库
+loomsearch sqlite-query <数据库> <查询...>                    # FTS5 查询（BM25/短语/前缀）
+loomsearch corpus-gen <目录> [--files N] [--words N]         # 生成确定性 benchmark 语料
+loomsearch bench-search <目录> [--threads N] [--queries N]   # 对比两个检索后端
+```
+
+运行 `loomsearch --help` 可查看全部命令和参数。
+
+### 手写后端：index / query
 
 建立索引：
 
@@ -38,7 +54,7 @@ build\loomsearch.exe
 .\build\loomsearch.exe index .\documents --threads 8 --output .\index.bin
 ```
 
-查询索引：
+查询：
 
 ```powershell
 .\build\loomsearch.exe query .\index.bin "thread pool"
@@ -47,17 +63,13 @@ build\loomsearch.exe
 输出示例：
 
 ```text
-matches: 3
-documents/thread_pool.txt
-documents/logger.md
-documents/design.md
+matches: 1
+documents/thread_pool.md
 ```
 
-多个关键词使用 AND 语义。例如 `thread pool` 只返回同时包含 `thread` 和 `pool` 的文件。
+多个关键词使用 AND 语义：`thread pool` 只返回同时包含 `thread` 和 `pool` 的文件。
 
-### SQLite FTS5 后端
-
-除了手写倒排索引，还内置了一个基于 SQLite FTS5 的检索后端：
+### SQLite FTS5 后端：sqlite-index / sqlite-query
 
 ```powershell
 .\build\loomsearch.exe sqlite-index .\documents --threads 8 --output .\index.db
@@ -70,18 +82,6 @@ FTS5 额外提供手写索引没有的能力：
 - **短语查询**：`sqlite-query .\index.db '"thread pool"'` 只命中相邻词组。
 - **前缀查询**：`sqlite-query .\index.db 'thread*'` 命中 `thread`、`threads` 等。
 
-SQLite 以官方 amalgamation 形式 vendor 在 `third_party/sqlite/`，构建完全离线。
-
-## 调试命令
-
-旧命令仍然保留，用于观察线程池和日志组件：
-
-```powershell
-.\build\loomsearch.exe bench-pool --threads 8 --jobs 100000
-.\build\loomsearch.exe bench-log --messages 100000 --file .\bench.log
-.\build\loomsearch.exe grep --file .\loomsearch.log --keyword processed
-```
-
 ## 架构
 
 ```text
@@ -91,21 +91,19 @@ SQLite 以官方 amalgamation 形式 vendor 在 `third_party/sqlite/`，构建�
                                         |
                                         v
                                InvertedIndex -> IndexStore
-
   query:
     IndexStore -> QueryEngine -> matches
 
 SQLite FTS5 后端:
   sqlite-index:
     DirectoryScanner -> ThreadPool -> 读原文 -> SqliteStore (FTS5)
-
   sqlite-query:
     SqliteStore (FTS5 MATCH + BM25) -> matches
 ```
 
-worker 线程只负责读取和解析文件，不直接修改共享索引。主线程统一合并 `FileResult`，减少锁竞争，也让并发边界更容易解释和测试。
+worker 线程只负责读取和解析文件、返回 `FileResult`，不直接修改共享索引；主线程统一合并结果，减少锁竞争，也让并发边界更容易解释和测试。
 
-## 验证
+## 测试与质量
 
 运行全部测试：
 
@@ -119,35 +117,22 @@ ctest --test-dir build --output-on-failure
 .\build\test_cli.exe
 ```
 
-手动端到端验证：
-
-```powershell
-New-Item -ItemType Directory -Force -Path .\out\loomsearch-demo
-Set-Content -Path .\out\loomsearch-demo\thread_pool.txt -Value 'thread pool worker'
-Set-Content -Path .\out\loomsearch-demo\logger.md -Value 'thread logger'
-.\build\loomsearch.exe index .\out\loomsearch-demo --threads 2 --output .\out\loomsearch-demo\index.bin
-.\build\loomsearch.exe query .\out\loomsearch-demo\index.bin "thread pool"
-```
-
-期望输出包含：
-
-```text
-matches: 1
-thread_pool.txt
-```
+CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan；本地 Debug、Release、MSVC 三种构建均通过 39 个测试。
 
 ## Benchmark
 
-本机轻量数据，时间为一次运行结果，用于观察量级，不作为跨机器结论：
+`corpus-gen` 使用固定字典 + 线性同余发生器生成语料，相同参数输出完全确定；`bench-search` 用同一批文件对比手写索引和 FTS5 的构建耗时、索引体积与查询耗时，并核对结果集是否一致（`parity_mismatches`）。
 
-```text
-处理器标识: Intel64 Family 6 Model 154 Stepping 3, GenuineIntel
-线程池: 100000 个任务，4 线程，1759 ms
-std::async: 100000 个任务，17988 ms
-异步日志: 1000000 条消息，submit 1142 ms，total 1142 ms，dropped 0
+一键复现：
+
+```powershell
+.\build\loomsearch.exe corpus-gen .\out\corpus --files 2000 --words 80
+.\build\loomsearch.exe bench-search .\out\corpus --threads 4 --queries 30
 ```
 
-搜索后端对比（`corpus-gen` 生成 2000 个合成文件、约 1.1 MB，4 线程，30 个查询，一次运行）：
+或直接运行 `scripts/benchmark.ps1`（Linux/macOS 用 `scripts/benchmark.sh`）。
+
+本机一次运行（Intel64 Family 6 Model 154，4 线程，30 个查询，结果只用于观察量级、不做跨机器结论）：
 
 ```text
 手写索引    build 271 ms, 索引 3.2 MB, query 总计 28.8 ms
@@ -155,18 +140,8 @@ SQLite FTS5 build 178 ms, 索引 2.1 MB, query 总计 165.2 ms
 parity_mismatches: 0
 ```
 
-生成可复现的 benchmark 语料并对比两个后端：
-
-```powershell
-.\build\loomsearch.exe corpus-gen .\out\corpus --files 2000 --words 80
-.\build\loomsearch.exe bench-search .\out\corpus --threads 4 --queries 30
-```
-
 ## 设计取舍
 
-- worker 返回 `FileResult`，主线程合并索引，避免多个线程同时写 `unordered_map`。
-- 索引格式先用文本格式，方便查看、调试和测试。
-- 查询先支持单关键词和多关键词 AND，不引入排名系统。
-- SQLite FTS5 后端与手写索引并存：FTS5 用紧凑 posting 编码 + BM25/短语/前缀，构建更快、磁盘更小，但单条查询比内存哈希倒排索引慢；手写索引胜在无依赖、可解释、查询快。
-- FTS5 用 unicode61 分词，手写索引用 ASCII 分词，两者在 ASCII 单词上结果一致（benchmark 的 `parity_mismatches` 为 0）。
-- Logger 使用独立后台线程，不放进文件处理线程池，避免监控日志被慢任务拖住。
+详见 [DESIGN.md](DESIGN.md)。核心结论：手写索引胜在无依赖、可解释、单条查询快；SQLite FTS5 胜在构建更快、磁盘更小，并提供 BM25 排名、短语和前缀查询。二者并存，benchmark 才能对比「自研轮子」与「工业级方案」的真实取舍。
+
+术语解释见 [GLOSSARY.md](GLOSSARY.md)。

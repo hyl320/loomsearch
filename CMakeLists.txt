@@ -1,10 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
-project(loomlog VERSION 0.1.0 LANGUAGES C CXX)
+project(loomlog VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# 源码使用 UTF-8 中文注释；MSVC 在中文系统（代码页 936）下默认按本地编码读取，
+# 会让中文注释破坏后续 token。显式指定 /utf-8，保证在 Windows/MSVC 上也能构建。
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 option(LOOMLOG_BUILD_TESTS "Build tests" ON)
 option(LOOMLOG_BUILD_BENCH "Build benches" ON)
