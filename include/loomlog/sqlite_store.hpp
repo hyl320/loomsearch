@@ -2,8 +2,10 @@
 
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +16,13 @@ namespace loom {
 struct SqliteSearchHit {
     std::string path;
     double rank{0.0};
+};
+
+struct SqliteFileState {
+    std::string path;
+    std::uintmax_t file_size{0};
+    std::int64_t last_write_time{0};
+    std::string content_hash;
 };
 
 // SQLite FTS5 检索后端的存储与查询封装。
@@ -41,6 +50,19 @@ public:
 
     // 把一份文档全文加入 FTS5 索引。path 只存不索引，content 参与检索。
     void insert(std::string_view path, std::string_view content);
+
+    // 替换指定路径的全文内容；同一路径只保留一份文档。
+    void update(std::string_view path, std::string_view content);
+
+    // 从全文索引删除指定路径的文档。
+    void remove(std::string_view path);
+
+    void upsert_file_state(const SqliteFileState& state);
+    void remove_file_state(std::string_view path);
+    std::vector<SqliteFileState> file_states() const;
+
+    void set_index_root(std::string_view root);
+    std::optional<std::string> index_root() const;
 
     // 执行 FTS5 MATCH 查询，结果按 BM25 相关度从高到低返回。
     std::vector<SqliteSearchHit> search(std::string_view query) const;

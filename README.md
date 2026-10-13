@@ -1,6 +1,6 @@
 # LoomSearch
 
-LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫描目录，并发读取与分词，构建倒排索引，并从索引文件查询关键词。它同时内置 SQLite FTS5 作为第二个检索后端，用于对比「自研倒排索引」和「工业级 FTS5」的真实取舍。
+LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫描目录，并发读取与分词，构建倒排索引，并从索引文件查询关键词。它同时内置 SQLite FTS5 增量索引后端，用于实际的可重复本地搜索，以及对比「自研倒排索引」和「工业级 FTS5」的真实取舍。
 
 ## 支持范围
 
@@ -13,7 +13,7 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫�
 .hpp
 ```
 
-不做 GUI、HTTP 服务、模糊搜索、增量索引和文件监听。
+不做 GUI、HTTP 服务、模糊搜索和文件监听。手写后端保持全量构建；SQLite 后端支持增量索引。
 
 ## 构建
 
@@ -38,7 +38,7 @@ build/loomsearch         # Linux / macOS
 ```text
 loomsearch index <目录> [--threads N] [--output PATH]        # 手写倒排索引
 loomsearch query <索引文件> <关键词...>                       # 多关键词 AND 查询
-loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 建库
+loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 增量建库
 loomsearch sqlite-query <数据库> <查询...>                    # FTS5 查询（BM25/短语/前缀）
 loomsearch corpus-gen <目录> [--files N] [--words N]         # 生成确定性 benchmark 语料
 loomsearch bench-search <目录> [--threads N] [--queries N]   # 对比两个检索后端
@@ -76,6 +76,10 @@ documents/thread_pool.md
 .\build\loomsearch.exe sqlite-query .\index.db "thread pool"
 ```
 
+`sqlite-index` 将文件状态（路径、大小、修改时间、内容 hash）和 FTS5 文档保存在同一个数据库：首次执行建立完整索引；后续执行跳过未变化文件，只读取新增或修改文件，并删除已经从目录消失的文档。数据库会绑定首次使用的规范化绝对目录；用不同目录复用同一个数据库会被拒绝，避免误删原索引。
+
+输出中的 `files_read`、`files_unchanged`、`files_removed` 可直接观察增量效果。例如仅修改一个文件时，预期 `files_read: 1`、`files_updated: 1`；没有变化时，预期 `files_read: 0`。
+
 FTS5 额外提供手写索引没有的能力：
 
 - **BM25 排名**：结果按相关度从高到低排序。
@@ -96,12 +100,12 @@ FTS5 额外提供手写索引没有的能力：
 
 SQLite FTS5 后端:
   sqlite-index:
-    DirectoryScanner -> ThreadPool -> 读原文 -> SqliteStore (FTS5)
+    DirectoryScanner -> 文件状态比较 -> 只读变化文件 -> SqliteStore (FTS5 + 状态表)
   sqlite-query:
     SqliteStore (FTS5 MATCH + BM25) -> matches
 ```
 
-worker 线程只负责读取和解析文件、返回 `FileResult`，不直接修改共享索引；主线程统一合并结果，减少锁竞争，也让并发边界更容易解释和测试。
+手写后端的 worker 线程只负责读取和解析文件、返回 `FileResult`，不直接修改共享索引；主线程统一合并结果，减少锁竞争，也让并发边界更容易解释和测试。
 
 ## 测试与质量
 

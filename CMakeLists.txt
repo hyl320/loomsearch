@@ -41,6 +41,7 @@ add_library(loomlog
   src/index_store.cpp
   src/query_engine.cpp
   src/sqlite_store.cpp
+  src/sqlite_indexer.cpp
 )
 add_library(loomlog::loomlog ALIAS loomlog)
 target_compile_features(loomlog PUBLIC cxx_std_20)
@@ -101,6 +102,9 @@ if(LOOMLOG_BUILD_TESTS)
     add_executable(test_sqlite_store tests/test_sqlite_store.cpp)
     target_link_libraries(test_sqlite_store PRIVATE loomlog GTest::gtest_main)
 
+    add_executable(test_sqlite_indexer tests/test_sqlite_indexer.cpp)
+    target_link_libraries(test_sqlite_indexer PRIVATE loomlog GTest::gtest_main)
+
     if(LOOMLOG_BUILD_CLI)
         add_executable(test_cli tests/test_cli.cpp)
         target_link_libraries(test_cli PRIVATE GTest::gtest_main)
@@ -119,6 +123,7 @@ if(LOOMLOG_BUILD_TESTS)
     gtest_discover_tests(test_index_store)
     gtest_discover_tests(test_query_engine)
     gtest_discover_tests(test_sqlite_store)
+    gtest_discover_tests(test_sqlite_indexer)
     if(LOOMLOG_BUILD_CLI)
         gtest_discover_tests(test_cli)
     endif()

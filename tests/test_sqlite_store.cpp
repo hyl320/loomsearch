@@ -137,3 +137,81 @@ TEST(SqliteStoreTest, MoveAssignmentReleasesOldConnectionAndKeepsInsertUsable) {
     EXPECT_EQ(first.document_count(), 2u);
     EXPECT_EQ(first.search("alpha").size(), 1u);
 }
+
+TEST(SqliteStoreTest, PersistsFileStatesAcrossReopenAndUpsertsByPath) {
+    const auto db = temp_db("loomlog_sqlite_store_file_states.db");
+    remove_db(db);
+    {
+        loom::SqliteStore store;
+        store.open(db);
+        store.upsert_file_state({"a.txt", 10, 100, "hash-a"});
+        store.upsert_file_state({"b.txt", 20, 200, "hash-b"});
+        store.upsert_file_state({"a.txt", 11, 101, "hash-a2"});
+    }
+    loom::SqliteStore store;
+    store.open(db);
+    const auto states = store.file_states();
+    ASSERT_EQ(states.size(), 2u);
+    EXPECT_EQ(states[0].path, "a.txt");
+    EXPECT_EQ(states[0].file_size, 11u);
+    EXPECT_EQ(states[0].last_write_time, 101);
+    EXPECT_EQ(states[0].content_hash, "hash-a2");
+    EXPECT_EQ(states[1].path, "b.txt");
+}
+
+TEST(SqliteStoreTest, RemovesFileStateByPath) {
+    const auto db = temp_db("loomlog_sqlite_store_remove_state.db");
+    remove_db(db);
+    loom::SqliteStore store;
+    store.open(db);
+    store.upsert_file_state({"a.txt", 1, 2, "hash"});
+    store.remove_file_state("a.txt");
+    EXPECT_TRUE(store.file_states().empty());
+}
+
+TEST(SqliteStoreTest, PersistsIndexRootAcrossReopen) {
+    const auto db = temp_db("loomlog_sqlite_store_root.db");
+    remove_db(db);
+    {
+        loom::SqliteStore store;
+        store.open(db);
+        EXPECT_FALSE(store.index_root().has_value());
+        store.set_index_root("D:/documents");
+    }
+    loom::SqliteStore store;
+    store.open(db);
+    EXPECT_EQ(store.index_root(), std::optional<std::string>("D:/documents"));
+}
+
+TEST(SqliteStoreTest, UpdatesDocumentContentWithoutLeavingOldTerms) {
+    const auto db = temp_db("loomlog_sqlite_store_update.db");
+    remove_db(db);
+
+    loom::SqliteStore store;
+    store.open(db);
+    store.insert("documents/a.txt", "old unique term");
+    store.update("documents/a.txt", "new unique term");
+
+    EXPECT_TRUE(store.search("old").empty());
+    const auto hits = store.search("new");
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_EQ(hits[0].path, "documents/a.txt");
+    EXPECT_EQ(store.document_count(), 1u);
+}
+
+TEST(SqliteStoreTest, RemovesDocumentFromSearchResults) {
+    const auto db = temp_db("loomlog_sqlite_store_remove.db");
+    remove_db(db);
+
+    loom::SqliteStore store;
+    store.open(db);
+    store.insert("documents/a.txt", "alpha");
+    store.insert("documents/b.txt", "alpha");
+    store.remove("documents/a.txt");
+
+    const auto hits = store.search("alpha");
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_EQ(hits[0].path, "documents/b.txt");
+    store.remove("documents/a.txt");
+    EXPECT_EQ(store.document_count(), 1u);
+}

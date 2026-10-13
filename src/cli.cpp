@@ -4,6 +4,7 @@
 #include "loomlog/query_engine.hpp"
 #include "loomlog/directory_scanner.hpp"
 #include "loomlog/sqlite_store.hpp"
+#include "loomlog/sqlite_indexer.hpp"
 #include "loomlog/thread_pool.hpp"
 
 #include <algorithm>
@@ -386,59 +387,25 @@ int run_sqlite_index(int argc, char* argv[]) {
         }
     }
 
+    static_cast<void>(thread_count);
     const auto started = std::chrono::steady_clock::now();
-    const auto files = loom::DirectoryScanner{}.scan(root);
-
-    loom::ThreadPool pool(thread_count);
-
-    // 重建语义：清掉上一次的索引，避免把新文档追加进旧库。
-    std::error_code ec;
-    std::filesystem::remove(output, ec);
-    std::filesystem::remove(output.string() + "-wal", ec);
-    std::filesystem::remove(output.string() + "-shm", ec);
-
-    loom::SqliteStore store;
-    store.open(output);
-    store.begin_transaction();
-
-    std::size_t files_success = 0;
-    std::size_t files_failed = 0;
-    std::size_t bytes_total = 0;
-
-    process_raw_files(files, pool, [&](std::future<RawFile>& future) {
-        RawFile raw;
-        try {
-            raw = future.get();
-        } catch (const std::exception&) {
-            ++files_failed;
-            return;
-        }
-        if (!raw.success) {
-            ++files_failed;
-            return;
-        }
-        bytes_total += raw.bytes;
-        store.insert(raw.path, raw.text);
-        ++files_success;
-    });
-
-    store.commit_transaction();
-    store.close();
-    pool.shutdown();
+    const auto stats = loom::SqliteIndexer{}.build({root, output});
 
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started
     ).count();
 
     std::cout << "command: sqlite-index\n";
-    std::cout << "files_total: " << files.size() << '\n';
-    std::cout << "files_success: " << files_success << '\n';
-    std::cout << "files_failed: " << files_failed << '\n';
-    std::cout << "bytes_total: " << bytes_total << '\n';
+    std::cout << "files_total: " << stats.files_total << '\n';
+    std::cout << "files_success: " << stats.files_updated << '\n';
+    std::cout << "files_failed: " << stats.files_failed << '\n';
+    std::cout << "files_read: " << stats.files_read << '\n';
+    std::cout << "files_unchanged: " << stats.files_unchanged << '\n';
+    std::cout << "files_removed: " << stats.files_removed << '\n';
     std::cout << "elapsed_ms: " << elapsed_ms << '\n';
     std::cout << "output: " << output.lexically_normal().string() << '\n';
 
-    return files_failed == 0 ? 0 : 1;
+    return stats.files_failed == 0 ? 0 : 1;
 }
 
 int run_sqlite_query(int argc, char* argv[]) {

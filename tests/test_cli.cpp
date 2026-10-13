@@ -66,6 +66,9 @@ TEST(CliTest, SqliteIndexAndQueryRoundTrip) {
     const auto db_path = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite.db";
     const auto query_output = root / "query.out";
     std::filesystem::remove_all(root);
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
     std::filesystem::create_directories(root);
     std::ofstream(root / "thread_pool.txt") << "thread pool worker";
     std::ofstream(root / "logger.md") << "thread logger";
@@ -90,11 +93,40 @@ TEST(CliTest, SqliteIndexAndQueryRoundTrip) {
     EXPECT_EQ(text.find("logger.md"), std::string::npos);
 }
 
+TEST(CliTest, SqliteIndexReusesDatabaseIncrementally) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_incremental_docs";
+    const auto db_path = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_incremental.db";
+    const auto output = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_incremental.out";
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "a.txt") << "alpha";
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    const auto index = [&](const std::string& extra = "") {
+        return cmd_wrap(cli + " sqlite-index " + quote(root) + " --output " + quote(db_path)
+            + extra + " > " + quote(output));
+    };
+
+    ASSERT_EQ(std::system(index().c_str()), 0);
+    EXPECT_NE(read_file(output).find("files_success: 1"), std::string::npos);
+    ASSERT_EQ(std::system(index().c_str()), 0);
+    EXPECT_NE(read_file(output).find("files_unchanged: 1"), std::string::npos);
+
+    std::filesystem::remove(root / "a.txt");
+    ASSERT_EQ(std::system(index().c_str()), 0);
+    EXPECT_NE(read_file(output).find("files_removed: 1"), std::string::npos);
+}
+
 TEST(CliTest, SqliteIndexAndBenchmarkProcessBeyondInFlightWindow) {
     const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_window";
     const auto db_path = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_window.db";
     const auto output = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_window.out";
     std::filesystem::remove_all(root);
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path.string() + "-wal");
+    std::filesystem::remove(db_path.string() + "-shm");
     std::filesystem::create_directories(root);
     for (int i = 0; i < 70; ++i) {
         std::ofstream(root / ("doc_" + std::to_string(i) + ".txt")) << "thread pool";
