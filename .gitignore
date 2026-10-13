@@ -27,3 +27,7 @@ compile_commands.json
 
 .DS_Store
 Thumbs.db
+.agents/
+.archify/
+skills-lock.json
+tests/playground_test.cpp
