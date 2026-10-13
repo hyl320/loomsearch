@@ -101,11 +101,6 @@ if(LOOMLOG_BUILD_TESTS)
     add_executable(test_sqlite_store tests/test_sqlite_store.cpp)
     target_link_libraries(test_sqlite_store PRIVATE loomlog GTest::gtest_main)
 
-    add_executable(test_playground tests/playground_test.cpp)
-    target_link_libraries(test_playground PRIVATE GTest::gtest_main)
-
-   
-
     if(LOOMLOG_BUILD_CLI)
         add_executable(test_cli tests/test_cli.cpp)
         target_link_libraries(test_cli PRIVATE GTest::gtest_main)
