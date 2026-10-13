@@ -62,6 +62,20 @@ public:
         }
     }
 
+    void reset_for_reuse() {
+        if (sqlite3_reset(stmt_) != SQLITE_OK) {
+            throw_db_error(db_, "cannot reset insert");
+        }
+        if (sqlite3_clear_bindings(stmt_) != SQLITE_OK) {
+            throw_db_error(db_, "cannot clear insert bindings");
+        }
+    }
+
+    void discard_result() noexcept {
+        sqlite3_reset(stmt_);
+        sqlite3_clear_bindings(stmt_);
+    }
+
 private:
     sqlite3* db_{nullptr};
     sqlite3_stmt* stmt_{nullptr};
@@ -71,16 +85,27 @@ private:
 
 struct SqliteStore::Impl {
     sqlite3* db{nullptr};
+    std::unique_ptr<Statement> insert_statement;
 };
 
 SqliteStore::SqliteStore() : impl_(std::make_unique<Impl>()) {}
 
 SqliteStore::~SqliteStore() {
-    close();
+    if (impl_ != nullptr) {
+        close();
+    }
 }
 
 SqliteStore::SqliteStore(SqliteStore&&) noexcept = default;
-SqliteStore& SqliteStore::operator=(SqliteStore&&) noexcept = default;
+SqliteStore& SqliteStore::operator=(SqliteStore&& other) noexcept {
+    if (this != &other) {
+        if (impl_ != nullptr) {
+            close();
+        }
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
 
 void SqliteStore::open(const std::filesystem::path& path) {
     close();
@@ -102,9 +127,15 @@ void SqliteStore::open(const std::filesystem::path& path) {
         "CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(path UNINDEXED, content);",
         "cannot create fts5 table"
     );
+    impl_->insert_statement = std::make_unique<Statement>(
+        impl_->db,
+        "INSERT INTO documents(path, content) VALUES(?1, ?2);",
+        "cannot prepare insert"
+    );
 }
 
 void SqliteStore::close() {
+    impl_->insert_statement.reset();
     if (impl_->db != nullptr) {
         sqlite3_close(impl_->db);
         impl_->db = nullptr;
@@ -120,14 +151,16 @@ void SqliteStore::commit_transaction() {
 }
 
 void SqliteStore::insert(std::string_view path, std::string_view content) {
-    Statement statement(
-        impl_->db,
-        "INSERT INTO documents(path, content) VALUES(?1, ?2);",
-        "cannot prepare insert"
-    );
-    statement.bind_text(1, path, "cannot bind path");
-    statement.bind_text(2, content, "cannot bind content");
-    statement.step_done("cannot insert document");
+    auto& statement = *impl_->insert_statement;
+    try {
+        statement.bind_text(1, path, "cannot bind path");
+        statement.bind_text(2, content, "cannot bind content");
+        statement.step_done("cannot insert document");
+        statement.reset_for_reuse();
+    } catch (...) {
+        statement.discard_result();
+        throw;
+    }
 }
 
 std::vector<SqliteSearchHit> SqliteStore::search(std::string_view query) const {

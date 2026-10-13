@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -97,4 +98,42 @@ TEST(SqliteStoreTest, RanksByTermFrequency) {
     ASSERT_EQ(hits.size(), 2);
     EXPECT_EQ(hits[0].path, "documents/frequent.txt");
     EXPECT_EQ(hits[1].path, "documents/rare.txt");
+}
+
+TEST(SqliteStoreTest, ReusesInsertAcrossTransactionsAndReopen) {
+    const auto db = temp_db("loomlog_sqlite_store_reuse.db");
+    remove_db(db);
+
+    loom::SqliteStore store;
+    store.open(db);
+    store.begin_transaction();
+    for (int i = 0; i < 70; ++i) {
+        store.insert("doc_" + std::to_string(i), i % 2 == 0 ? "alpha" : "beta");
+    }
+    store.commit_transaction();
+    EXPECT_EQ(store.document_count(), 70u);
+    EXPECT_EQ(store.search("alpha").size(), 35u);
+
+    store.close();
+    store.open(db);
+    store.insert("new.txt", "gamma");
+    EXPECT_EQ(store.document_count(), 71u);
+    ASSERT_EQ(store.search("gamma").size(), 1u);
+}
+
+TEST(SqliteStoreTest, MoveAssignmentReleasesOldConnectionAndKeepsInsertUsable) {
+    const auto first_db = temp_db("loomlog_sqlite_store_move_first.db");
+    const auto second_db = temp_db("loomlog_sqlite_store_move_second.db");
+    remove_db(first_db);
+    remove_db(second_db);
+
+    loom::SqliteStore first;
+    first.open(first_db);
+    loom::SqliteStore second;
+    second.open(second_db);
+    second.insert("before.txt", "beta");
+    first = std::move(second);
+    first.insert("after.txt", "alpha");
+    EXPECT_EQ(first.document_count(), 2u);
+    EXPECT_EQ(first.search("alpha").size(), 1u);
 }

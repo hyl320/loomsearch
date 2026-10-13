@@ -17,17 +17,31 @@ std::vector<std::string> QueryEngine::query(
         return {};
     }
 
-    auto matches = index.find(terms.front());
+    if (terms.size() == 1) {
+        return index.find(terms.front());
+    }
 
-    // 多关键词采用 AND 语义：每追加一个词，就和当前命中文档列表求交集。
-    for (std::size_t i = 1; i < terms.size(); ++i) {
-        const auto docs = index.find(terms[i]);
+    std::vector<std::vector<std::string>> postings;
+    postings.reserve(terms.size());
+    for (const auto& term : terms) {
+        auto docs = index.find(term);
+        if (docs.empty()) {
+            return {};
+        }
+        postings.push_back(std::move(docs));
+    }
+    std::sort(postings.begin(), postings.end(), [](const auto& left, const auto& right) {
+        return left.size() < right.size();
+    });
+
+    auto matches = std::move(postings.front());
+    for (std::size_t i = 1; i < postings.size(); ++i) {
         std::vector<std::string> intersection;
         std::set_intersection(
             matches.begin(),
             matches.end(),
-            docs.begin(),
-            docs.end(),
+            postings[i].begin(),
+            postings[i].end(),
             std::back_inserter(intersection)
         );
         matches = std::move(intersection);

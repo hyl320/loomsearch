@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <future>
 #include <fstream>
@@ -73,10 +74,48 @@ RawFile read_raw(const std::filesystem::path& path) {
     return result;
 }
 
+template <class Consume>
+void process_raw_files(
+    const std::vector<std::filesystem::path>& files,
+    loom::ThreadPool& pool,
+    Consume consume
+) {
+    constexpr std::size_t max_in_flight = 32;
+    std::deque<std::future<RawFile>> futures;
+    std::size_t next_file = 0;
+    const auto submit_next = [&] {
+        futures.push_back(pool.submit([file = files[next_file]] {
+            return read_raw(file);
+        }));
+        ++next_file;
+    };
+
+    while (next_file < files.size() && futures.size() < max_in_flight) {
+        submit_next();
+    }
+    while (!futures.empty()) {
+        auto future = std::move(futures.front());
+        futures.pop_front();
+        consume(future);
+        if (next_file < files.size()) {
+            submit_next();
+        }
+    }
+}
+
 long long elapsed_ms(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start
     ).count();
+}
+
+long long percentile_ns(std::vector<long long> samples, std::size_t percentile) {
+    if (samples.empty()) {
+        return 0;
+    }
+    std::sort(samples.begin(), samples.end());
+    const auto rank = (percentile * samples.size() + 99) / 100;
+    return samples[rank - 1];
 }
 
 std::size_t lcg_next(std::uint64_t& state) {
@@ -351,13 +390,6 @@ int run_sqlite_index(int argc, char* argv[]) {
     const auto files = loom::DirectoryScanner{}.scan(root);
 
     loom::ThreadPool pool(thread_count);
-    std::vector<std::future<RawFile>> futures;
-    futures.reserve(files.size());
-    for (auto& file : files) {
-        futures.push_back(pool.submit([file = std::move(file)] {
-            return read_raw(file);
-        }));
-    }
 
     // 重建语义：清掉上一次的索引，避免把新文档追加进旧库。
     std::error_code ec;
@@ -373,22 +405,22 @@ int run_sqlite_index(int argc, char* argv[]) {
     std::size_t files_failed = 0;
     std::size_t bytes_total = 0;
 
-    for (auto& future : futures) {
+    process_raw_files(files, pool, [&](std::future<RawFile>& future) {
         RawFile raw;
         try {
             raw = future.get();
         } catch (const std::exception&) {
             ++files_failed;
-            continue;
+            return;
         }
         if (!raw.success) {
             ++files_failed;
-            continue;
+            return;
         }
         bytes_total += raw.bytes;
         store.insert(raw.path, raw.text);
         ++files_success;
-    }
+    });
 
     store.commit_transaction();
     store.close();
@@ -538,25 +570,18 @@ int run_bench_search(int argc, char* argv[]) {
 
     const auto sqlite_started = std::chrono::steady_clock::now();
     loom::ThreadPool pool(thread_count);
-    std::vector<std::future<RawFile>> futures;
-    futures.reserve(files.size());
-    for (auto& file : files) {
-        futures.push_back(pool.submit([file = std::move(file)] {
-            return read_raw(file);
-        }));
-    }
 
     long long sqlite_build_ms = 0;
     {
         loom::SqliteStore store;
         store.open(db);
         store.begin_transaction();
-        for (auto& future : futures) {
+        process_raw_files(files, pool, [&](std::future<RawFile>& future) {
             auto raw = future.get();
             if (raw.success) {
                 store.insert(raw.path, raw.text);
             }
-        }
+        });
         store.commit_transaction();
         sqlite_build_ms = elapsed_ms(sqlite_started);
         store.close();
@@ -564,7 +589,7 @@ int run_bench_search(int argc, char* argv[]) {
     pool.shutdown();
     const auto sqlite_bytes = std::filesystem::file_size(db);
 
-    // 查询对比：取手写索引里文档数最多的前 K 个单词作为共享查询集，逐条计时并核对结果集。
+    // 查询对比：同一批高频词构成单词查询和相邻词的 AND 查询。
     auto snapshot = hand.index.snapshot();
     std::sort(snapshot.begin(), snapshot.end(), [](const auto& left, const auto& right) {
         return left.second.size() > right.second.size();
@@ -577,22 +602,31 @@ int run_bench_search(int argc, char* argv[]) {
 
     long long hand_query_us = 0;
     long long sqlite_query_us = 0;
+    std::vector<long long> hand_single_ns, sqlite_single_ns;
+    std::vector<long long> hand_and_ns, sqlite_and_ns;
     std::size_t mismatches = 0;
 
-    for (std::size_t i = 0; i < query_limit; ++i) {
-        const std::string& term = snapshot[i].first;
-
+    const auto measure = [&](const std::string& term, bool multi_term) {
         const auto hand_query_started = std::chrono::steady_clock::now();
         const auto hand_hits = engine.query(hand.index, term);
-        hand_query_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        const auto hand_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - hand_query_started
         ).count();
 
         const auto sqlite_query_started = std::chrono::steady_clock::now();
         const auto sqlite_hits = query_store.search(term);
-        sqlite_query_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        const auto sqlite_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - sqlite_query_started
         ).count();
+        if (multi_term) {
+            hand_and_ns.push_back(hand_ns);
+            sqlite_and_ns.push_back(sqlite_ns);
+        } else {
+            hand_single_ns.push_back(hand_ns);
+            sqlite_single_ns.push_back(sqlite_ns);
+            hand_query_us += hand_ns / 1000;
+            sqlite_query_us += sqlite_ns / 1000;
+        }
 
         const std::set<std::string> hand_set(hand_hits.begin(), hand_hits.end());
         std::set<std::string> sqlite_set;
@@ -602,18 +636,34 @@ int run_bench_search(int argc, char* argv[]) {
         if (hand_set != sqlite_set) {
             ++mismatches;
         }
+    };
+
+    for (std::size_t i = 0; i < query_limit; ++i) {
+        measure(snapshot[i].first, false);
+        if (snapshot.size() > 1) {
+            measure(snapshot[i].first + " " + snapshot[(i + 1) % snapshot.size()].first, true);
+        }
     }
 
     std::cout << "command: bench-search\n";
     std::cout << "corpus_files: " << files.size() << '\n';
     std::cout << "corpus_bytes: " << hand.stats.bytes_total << '\n';
     std::cout << "queries: " << query_limit << '\n';
+    std::cout << "and_queries: " << hand_and_ns.size() << '\n';
     std::cout << "hand_index_build_ms: " << hand_build_ms << '\n';
     std::cout << "sqlite_index_build_ms: " << sqlite_build_ms << '\n';
     std::cout << "hand_index_bytes: " << hand_bytes << '\n';
     std::cout << "sqlite_index_bytes: " << sqlite_bytes << '\n';
     std::cout << "hand_query_total_us: " << hand_query_us << '\n';
     std::cout << "sqlite_query_total_us: " << sqlite_query_us << '\n';
+    std::cout << "hand_single_p50_ns: " << percentile_ns(hand_single_ns, 50) << '\n';
+    std::cout << "hand_single_p95_ns: " << percentile_ns(hand_single_ns, 95) << '\n';
+    std::cout << "sqlite_single_p50_ns: " << percentile_ns(sqlite_single_ns, 50) << '\n';
+    std::cout << "sqlite_single_p95_ns: " << percentile_ns(sqlite_single_ns, 95) << '\n';
+    std::cout << "hand_and_p50_ns: " << percentile_ns(hand_and_ns, 50) << '\n';
+    std::cout << "hand_and_p95_ns: " << percentile_ns(hand_and_ns, 95) << '\n';
+    std::cout << "sqlite_and_p50_ns: " << percentile_ns(sqlite_and_ns, 50) << '\n';
+    std::cout << "sqlite_and_p95_ns: " << percentile_ns(sqlite_and_ns, 95) << '\n';
     std::cout << "parity_mismatches: " << mismatches << '\n';
     return 0;
 }

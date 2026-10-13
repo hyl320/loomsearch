@@ -6,6 +6,7 @@
 #include "loomlog/thread_pool.hpp"
 
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <future>
 #include <string>
@@ -41,20 +42,25 @@ IndexBuildResult Indexer::build_files(
     result.stats.files_total = files.size();
 
     ThreadPool pool(thread_count);
-    //然后准备保存异步任务结果 每个文件都会提交成一个任务，每个任务返回一个 FileResult。
-    std::vector<std::future<FileResult>> futures;
-    futures.reserve(files.size());
-
-    // 并发边界：这里只提交独立文件任务，worker 不共享索引状态。
-    for (auto& file : files) {
+    constexpr std::size_t max_in_flight = 32;
+    std::deque<std::future<FileResult>> futures;
+    std::size_t next_file = 0;
+    const auto submit_next = [&] {
+        auto file = std::move(files[next_file]);
         futures.push_back(pool.submit([file = std::move(file)] {
-            //也就是读取文件、提取词语、生成该文件自己的处理结果
             return FileProcessor{}.process(file);
-        })); 
-       }
+        }));
+        ++next_file;
+    };
 
-    // 合并边界：future 回到主线程后，才统一写入倒排索引并更新统计。
-    for (auto& future : futures) {
+    while (next_file < files.size() && futures.size() < max_in_flight) {
+        submit_next();
+    }
+
+    // 主线程按提交顺序合并；取回一个结果后才补交一个任务。
+    while (!futures.empty()) {
+        auto future = std::move(futures.front());
+        futures.pop_front();
         try {
             auto file_result = future.get();
             if (!file_result.success) {
@@ -62,30 +68,29 @@ IndexBuildResult Indexer::build_files(
                 if (logger != nullptr) {
                     logger->warn("file failed path={} error={}", file_result.path, file_result.error);
                 }
-                continue;
-            }
-            //bytes_total：累计处理字节数
-            result.stats.bytes_total += file_result.bytes;
-            //keywords_total：累计词数量
-            result.stats.keywords_total += file_result.words.size();
-            //files_success：成功文件数
-            ++result.stats.files_success;
+            } else {
+                result.stats.bytes_total += file_result.bytes;
+                result.stats.keywords_total += file_result.words.size();
+                ++result.stats.files_success;
 
-            if (logger != nullptr) {
-                logger->info(
-                    "file processed path={} bytes={} words={}",
-                    file_result.path,
-                    file_result.bytes,
-                    file_result.words.size()
-                );
+                if (logger != nullptr) {
+                    logger->info(
+                        "file processed path={} bytes={} words={}",
+                        file_result.path,
+                        file_result.bytes,
+                        file_result.words.size()
+                    );
+                }
+                result.index.add_document(file_result.path, file_result.words);
             }
-            //最后把这个文件加入索引：
-            result.index.add_document(file_result.path, file_result.words);
         } catch (const std::exception& error) {
             ++result.stats.files_failed;
             if (logger != nullptr) {
                 logger->error("file task threw error={}", error.what());
             }
+        }
+        if (next_file < files.size()) {
+            submit_next();
         }
     }
 

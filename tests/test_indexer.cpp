@@ -62,3 +62,31 @@ TEST(IndexerTest, ExplicitFilesCountFailedProcessingResults) {
     EXPECT_EQ(result.stats.files_failed, 1u);
     EXPECT_EQ(result.index.find("thread"), std::vector<std::string>{existing.lexically_normal().string()});
 }
+
+TEST(IndexerTest, ProcessesFilesBeyondInFlightWindowIncludingFailures) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_indexer_window";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    std::vector<std::filesystem::path> files;
+    for (int i = 0; i < 70; ++i) {
+        const auto path = root / ("window_" + std::to_string(i) + ".txt");
+        if (i != 31 && i != 32) {
+            std::ofstream(path) << "thread pool";
+        }
+        files.push_back(path);
+    }
+
+    const auto result = loom::Indexer{}.build_files(files, 4);
+    EXPECT_EQ(result.stats.files_total, 70u);
+    EXPECT_EQ(result.stats.files_success, 68u);
+    EXPECT_EQ(result.stats.files_failed, 2u);
+    EXPECT_EQ(result.stats.bytes_total, 68u * 11u);
+    EXPECT_EQ(result.index.document_count(), 68u);
+    EXPECT_EQ(result.index.find("thread").size(), 68u);
+
+    for (int i = 0; i < 70; ++i) {
+        std::filesystem::remove(files[i]);
+    }
+    std::filesystem::remove(root);
+}
