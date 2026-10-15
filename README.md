@@ -13,7 +13,7 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫�
 .hpp
 ```
 
-不做 GUI、HTTP 服务、模糊搜索和文件监听。手写后端保持全量构建；SQLite 后端支持增量索引。
+不做 GUI、HTTP 服务和模糊搜索。手写后端保持全量构建与原子持久化；SQLite 后端支持单次增量索引以及常驻后台的实时持续监听与防抖自动更新。
 
 ## 构建
 
@@ -36,10 +36,12 @@ build/loomsearch         # Linux / macOS
 ## CLI 命令总览
 
 ```text
-loomsearch index <目录> [--threads N] [--output PATH]        # 手写倒排索引
+loomsearch index <目录> [--threads N] [--output PATH]        # 手写倒排索引 (全量构建)
 loomsearch query <索引文件> <关键词...>                       # 多关键词 AND 查询
-loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 增量建库
+loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 增量建库 (单次批量)
 loomsearch sqlite-query <数据库> <查询...>                    # FTS5 查询（BM25/短语/前缀）
+loomsearch watch <目录> <数据库> [--debounce MS] [--max-size MB]        # 实时常驻监控与自动增量更新
+loomsearch sqlite-watch <目录> <数据库> [--debounce MS] [--max-size MB] # 实时监控对等别名
 loomsearch corpus-gen <目录> [--files N] [--words N]         # 生成确定性 benchmark 语料
 loomsearch bench-search <目录> [--threads N] [--queries N]   # 对比两个检索后端
 ```
@@ -86,15 +88,32 @@ FTS5 额外提供手写索引没有的能力：
 - **短语查询**：`sqlite-query .\index.db '"thread pool"'` 只命中相邻词组。
 - **前缀查询**：`sqlite-query .\index.db 'thread*'` 命中 `thread`、`threads` 等。
 
+### 实时常驻监控与增量更新：watch / sqlite-watch
+
+启动长期运行的守护监听模式：
+
+```powershell
+.\build\loomsearch.exe watch .\documents .\index.db --debounce 100 --max-size 10
+```
+
+程序会在前台常驻运行，具备以下核心能力：
+- **存量基线同步**：启动时自动完成当前目录现有文件的增量基线构建并自愈异常状态；
+- **文件新建**：自动捕获并利用只读 `mmap` 分词入库；
+- **文件修改**：自动比对哈希并更新索引；
+- **文件删除**：自动从数据库抹除对应文档；
+- **防抖合并**：短时间内高频修改（如编辑器保存时的临时文件抖动）自动合并为 1 次处理；
+- **大文件限制**：超过 `--max-size`（默认 10MB）的文件自动跳过，防止内存耗尽；
+- **优雅退出**：按 `Ctrl+C` 触发平滑停机，未完成事件自动清扫刷盘，保证数据库绝不损坏。
+
 ## 架构
 
 ```text
 手写后端:
   index:
-    DirectoryScanner -> ThreadPool -> FileProcessor -> FileResult
+    DirectoryScanner -> ThreadPool -> FileProcessor (mmap) -> FileResult
                                         |
                                         v
-                               InvertedIndex -> IndexStore
+                               InvertedIndex -> IndexStore (原子影子写入)
   query:
     IndexStore -> QueryEngine -> matches
 
@@ -103,13 +122,15 @@ SQLite FTS5 后端:
     DirectoryScanner -> 文件状态比较 -> 只读变化文件 -> SqliteStore (FTS5 + 状态表)
   sqlite-query:
     SqliteStore (FTS5 MATCH + BM25) -> matches
+  watch (常驻监听):
+    FileWatcher (原生 OS 事件) -> EventDebouncer (防抖合并) -> ContinuousIndexer -> SqliteStore
 ```
 
-手写后端的 worker 线程只负责读取和解析文件、返回 `FileResult`，不直接修改共享索引；主线程统一合并结果，减少锁竞争，也让并发边界更容易解释和测试。
+手写后端的 worker 线程只负责读取和解析文件、返回 `FileResult`，不直接修改共享索引；主线程统一合并结果，减少锁竞争，也让并发边界更容易解释和测试。持久化采用影子临时文件刷盘与原子重命名，防止进程崩溃损坏旧索引。
 
 ## 测试与质量
 
-运行全部测试：
+运行全部测试（共 95 项自动化测试全部通过）：
 
 ```powershell
 ctest --test-dir build --output-on-failure
@@ -121,7 +142,7 @@ ctest --test-dir build --output-on-failure
 .\build\test_cli.exe
 ```
 
-CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan；本地 Debug、Release、MSVC 三种构建均通过 39 个测试。
+CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan；本地全套 95 项测试均 100% 通过。
 
 ## Benchmark
 

@@ -240,6 +240,61 @@ parity_mismatches: 0
 - **磁盘占用**：SQLite 数据库体积明显小于手写文本 `.bin` 文件。因为手写后端使用直观换行的可读文本格式存储路径与词条，而 FTS5 内部采用了前缀压缩与 Delta 编码的 B-Tree 页；
 - **查询延时**：手写后端在内存热路径上的单词与多词查询（微秒级）显著快于 SQLite。因为手写后端全部数据在 `InvertedIndex` 哈希表与 `vector` 中，无需经过 SQL 解析、虚拟表回调以及 SQLite VDBE 字节码引擎调度。
 
+## 阶段 4：持续更新和大文件能力
+
+在阶段 4 中，LoomSearch 实现了从单次批处理工具向常驻守护进程的演进，提供全天候长期运行、实时感知变动与大文件安全防护能力。
+
+### 1. 架构总览
+
+```text
+       【操作系统内核 (Windows ReadDirectoryChangesW / Linux inotify)】
+                                 │ 原生捕获变动
+                                 ▼
+                     【FileWatcher 监听器】
+                                 │ 派发原始事件
+                                 ▼
+                   【EventDebouncer 防抖合并器】
+                                 │ 窗口期消抖、状态机抵消与批量打包
+                                 ▼
+                 【ContinuousIndexer 持续更新引擎】
+                                 │
+     ┌───────────────────────────┴───────────────────────────┐
+     ▼                                                       ▼
+【MemoryMappedFile / 大文件防护】                   【SqliteStore / IndexStore】
+  - 零拷贝只读映射                                      - WAL 事务单批次写入
+  - 超过阈值安全拦截 (防 OOM)                           - 索引版本号与崩溃自愈
+```
+
+### 2. 核心组件与设计取舍
+
+1. **跨平台原生文件监听（`FileWatcher`）**：
+   - **Windows**：使用 `CreateFileW` 配合 `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED` 打开目录，调用 `ReadDirectoryChangesW`。通过双事件 `WaitForMultipleObjects({stop_event, io_event})` 实现待机时 0.00% CPU 占用，并支持 0 毫秒安全取消退出，避免线程阻塞死锁；
+   - **Linux**：使用内核原生 `inotify` 与 `poll` 双路管道监听，支持非阻塞优雅退出；
+   - **隔离设计**：采用 Pimpl 模式，杜绝 `<windows.h>` 全局宏污染。
+
+2. **事件防抖与状态机合并（`EventDebouncer`）**：
+   - **滑动窗口**：基于 `std::chrono::steady_clock`，高频事件不断后推冷却时间点；
+   - **状态机代数合并**：
+     - `Created + Modified -> Created`（避免读到未写完的空文件）；
+     - `Created + Deleted -> 消除`（秒建秒删的临时文件完全不产生数据库开销）；
+     - `Modified + Modified -> Modified`（多次连续保存合并为单一更新）；
+     - `Deleted + Created -> Modified`（完全覆盖重写）。
+   - **确定性单测**：接口支持注入虚拟时钟参数，测试无需 `sleep_for` 即可在数毫秒内完成全逻辑断言。
+
+3. **大文件防护与只读内存映射（`MemoryMappedFile`）**：
+   - 增加 `max_file_size` 阈值防护（默认 10MB），防止异常大文件撑爆内存；
+   - 对于普通文本使用系统级只读 `mmap`，获得 `std::string_view` 直接交由 `tokenize_with_frequency`，实现零拷贝分词；
+   - 0 字节文件安全退化，规避 Windows / POSIX 对 0 长度映射报错的问题。
+
+4. **原子持久化与崩溃自愈（Persistence & Recovery）**：
+   - **手写倒排索引**：写入临时文件 `.tmp`，刷盘后通过操作系统原子重命名（`rename`）瞬间切换，杜绝程序中途退出产生损坏的半截索引；
+   - **SQLite 后端**：元数据表维护 `schema_version` 与 `build_status`（`ready` / `syncing`），启动时自动检测未完成的异常关机并调用 `recover_clean_state()` 实现自愈。
+
+5. **CLI watch 指令**：
+   - 提供 `loomsearch watch <directory> <db-file>` 与 `loomsearch sqlite-watch` 命令；
+   - 支持 `--debounce MS` 与 `--max-size MB` 参数；
+   - 监听 `SIGINT` (Ctrl+C) 与 `SIGTERM`，实现无损平滑退出与统计数据汇总展示。
+
 ## 后续方向
 
 后续只有在测试和 benchmark 给出明确需求后才扩展：

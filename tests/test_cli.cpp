@@ -272,3 +272,38 @@ TEST(CliTest, QueryWithInvalidArgsReturnsNonZero) {
     const auto cmd_missing_file = cmd_wrap(cli + " query non_existent_file.bin keyword");
     EXPECT_NE(std::system(cmd_missing_file.c_str()), 0);
 }
+
+TEST(CliTest, WatchWithInvalidArgsReturnsNonZero) {
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+
+    // 缺少参数（只给了命令名）
+    const auto cmd_missing_args = cmd_wrap(cli + " watch");
+    EXPECT_NE(std::system(cmd_missing_args.c_str()), 0);
+
+    // 只有一个参数，缺少 db_path
+    const auto cmd_one_arg = cmd_wrap(cli + " watch some_dir");
+    EXPECT_NE(std::system(cmd_one_arg.c_str()), 0);
+
+    // 监听不存在的根目录
+    const auto cmd_non_existent_dir = cmd_wrap(cli + " watch non_existent_dir_123_abc index.db");
+    EXPECT_NE(std::system(cmd_non_existent_dir.c_str()), 0);
+
+    // 非法 debounce 参数 (0)
+    const auto cmd_invalid_debounce = cmd_wrap(cli + " watch . index.db --debounce 0");
+    EXPECT_NE(std::system(cmd_invalid_debounce.c_str()), 0);
+}
+
+TEST(CliTest, HelpDisplaysWatchCommandUsage) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_help";
+    std::filesystem::create_directories(root);
+    const auto help_output = root / "help.out";
+
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    const auto help_command = cmd_wrap(cli + " --help > " + quote(help_output));
+
+    ASSERT_EQ(std::system(help_command.c_str()), 0);
+
+    const auto text = read_file(help_output);
+    EXPECT_NE(text.find("loomsearch watch <directory>"), std::string::npos);
+    EXPECT_NE(text.find("loomsearch sqlite-watch <directory>"), std::string::npos);
+}

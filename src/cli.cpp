@@ -5,11 +5,13 @@
 #include "loomlog/directory_scanner.hpp"
 #include "loomlog/sqlite_store.hpp"
 #include "loomlog/sqlite_indexer.hpp"
+#include "loomlog/continuous_indexer.hpp"
 #include "loomlog/thread_pool.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -723,12 +725,86 @@ int run_bench_search(int argc, char* argv[]) {
     return 0;
 }
 
+std::atomic<bool> g_stop_requested{false};
+loom::ContinuousIndexer* g_active_indexer{nullptr};
+
+void handle_signal(int signal) {
+    (void)signal;
+    g_stop_requested.store(true);
+    if (g_active_indexer != nullptr) {
+        g_active_indexer->stop();
+    }
+}
+
+int run_watch(int argc, char* argv[]) {
+    if (argc < 4) {
+        throw std::invalid_argument("watch requires <directory> and <db-file>");
+    }
+
+    const std::filesystem::path root = argv[2];
+    const std::filesystem::path db_file = argv[3];
+    std::size_t debounce_ms = 100;
+    std::size_t max_size_mb = 10;
+
+    for (int i = 4; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if (arg == "--debounce" && i + 1 < argc) {
+            debounce_ms = parse_size(argv[++i], "--debounce");
+        } else if (arg == "--max-size" && i + 1 < argc) {
+            max_size_mb = parse_size(argv[++i], "--max-size");
+        } else {
+            throw std::invalid_argument("unknown watch option: " + std::string(arg));
+        }
+    }
+
+    loom::ContinuousIndexerOptions options;
+    options.root = root;
+    options.database = db_file;
+    options.debounce_delay = std::chrono::milliseconds(debounce_ms);
+    options.max_file_size = max_size_mb * 1024 * 1024;
+
+    loom::ContinuousIndexer indexer;
+    std::string error;
+    if (!indexer.start(options, &error)) {
+        throw std::runtime_error(error);
+    }
+
+    std::cout << "command: watch\n";
+    std::cout << "root: " << root.string() << '\n';
+    std::cout << "database: " << db_file.string() << '\n';
+    std::cout << "debounce_ms: " << debounce_ms << '\n';
+    std::cout << "max_size_mb: " << max_size_mb << '\n';
+    std::cout << "status: watching (press Ctrl+C to exit)\n";
+    std::cout.flush();
+
+    g_active_indexer = &indexer;
+    g_stop_requested.store(false);
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+
+    while (!g_stop_requested.load() && indexer.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    indexer.stop();
+    g_active_indexer = nullptr;
+
+    const auto stats = indexer.stats();
+    std::cout << "\nstatus: stopped\n";
+    std::cout << "events_received: " << stats.events_received << '\n';
+    std::cout << "files_indexed: " << stats.files_indexed << '\n';
+    std::cout << "files_removed: " << stats.files_removed << '\n';
+    return 0;
+}
+
 void print_usage() {
     std::cout << "usage:\n";
     std::cout << "  loomsearch index <directory> [--threads N] [--output PATH]\n";
     std::cout << "  loomsearch query <index-file> <keywords...> [--limit N] [--type EXT]\n";
     std::cout << "  loomsearch sqlite-index <directory> [--threads N] [--output PATH]\n";
     std::cout << "  loomsearch sqlite-query <db-file> <query...> [--limit N] [--type EXT]\n";
+    std::cout << "  loomsearch watch <directory> <db-file> [--debounce MS] [--max-size MB]\n";
+    std::cout << "  loomsearch sqlite-watch <directory> <db-file> [--debounce MS] [--max-size MB]\n";
     std::cout << "  loomsearch corpus-gen <directory> [--files N] [--words N]\n";
     std::cout << "  loomsearch bench-search <directory> [--threads N] [--queries N]\n";
     std::cout << "  loomsearch bench-pool [--threads N] [--jobs N]\n";
@@ -765,6 +841,9 @@ int main(int argc, char* argv[]) {
         }
         if (std::string_view(argv[1]) == "sqlite-query") {
             return run_sqlite_query(argc, argv);
+        }
+        if (std::string_view(argv[1]) == "watch" || std::string_view(argv[1]) == "sqlite-watch") {
+            return run_watch(argc, argv);
         }
         if (std::string_view(argv[1]) == "corpus-gen") {
             return run_corpus_gen(argc, argv);
