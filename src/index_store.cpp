@@ -1,5 +1,6 @@
 #include "loomlog/index_store.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -40,21 +41,41 @@ void IndexStore::save(const InvertedIndex& index, const std::filesystem::path& p
         std::filesystem::create_directories(parent);
     }
 
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        throw std::runtime_error("cannot open index for write: " + path.string());
+    // 原子保存：先写至带时间戳的临时影子文件，刷盘完整后再通过操作系统原子重命名替换
+    const auto tmp_path = path.string() + ".tmp."
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+
+    {
+        std::ofstream output(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw std::runtime_error("cannot open index for write: " + tmp_path);
+        }
+
+        // 文本格式保持可读和稳定；snapshot 已按关键词和路径排序。
+        const auto snapshot = index.snapshot();
+        output << kMagic << '\n';
+        output << snapshot.size() << '\n';
+        for (const auto& [word, docs] : snapshot) {
+            output << word << '\n';
+            output << docs.size() << '\n';
+            for (const auto& doc : docs) {
+                output << doc << '\n';
+            }
+        }
+        output.flush();
+        if (!output) {
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp_path, rm_ec);
+            throw std::runtime_error("failed to flush index file: " + tmp_path);
+        }
     }
 
-    // 文本格式保持可读和稳定；snapshot 已按关键词和路径排序。
-    const auto snapshot = index.snapshot();
-    output << kMagic << '\n';
-    output << snapshot.size() << '\n';
-    for (const auto& [word, docs] : snapshot) {
-        output << word << '\n';
-        output << docs.size() << '\n';
-        for (const auto& doc : docs) {
-            output << doc << '\n';
-        }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, path, ec);
+    if (ec) {
+        std::error_code rm_ec;
+        std::filesystem::remove(tmp_path, rm_ec);
+        throw std::runtime_error("cannot rename temporary index file to: " + path.string() + " (" + ec.message() + ")");
     }
 }
 

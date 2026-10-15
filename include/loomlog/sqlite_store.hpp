@@ -47,6 +47,17 @@ public:
     // 批量写入的显式事务边界，用于构建期把多次 insert 包成一个事务。
     void begin_transaction();
     void commit_transaction();
+    void rollback_transaction();
+
+    // 索引版本控制
+    static constexpr int kCurrentSchemaVersion = 1;
+    int schema_version() const;
+
+    // 构建/运行状态与崩溃恢复标记
+    void set_build_status(std::string_view status);
+    std::string build_status() const;
+    bool is_clean_shutdown() const;
+    bool recover_clean_state();
 
     // 把一份文档全文加入 FTS5 索引。path 只存不索引，content 参与检索。
     void insert(std::string_view path, std::string_view content);

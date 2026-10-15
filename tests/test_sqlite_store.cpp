@@ -215,3 +215,65 @@ TEST(SqliteStoreTest, RemovesDocumentFromSearchResults) {
     store.remove("documents/a.txt");
     EXPECT_EQ(store.document_count(), 1u);
 }
+
+TEST(SqliteStoreTest, RollbackDiscardsUncommittedChanges) {
+    const auto db = temp_db("loomlog_sqlite_store_rollback.db");
+    remove_db(db);
+
+    loom::SqliteStore store;
+    store.open(db);
+    store.begin_transaction();
+    store.insert("doc.txt", "secret keyword");
+    store.rollback_transaction();
+
+    EXPECT_EQ(store.document_count(), 0u);
+    EXPECT_TRUE(store.search("secret").empty());
+}
+
+TEST(SqliteStoreTest, TracksAndValidatesSchemaVersion) {
+    const auto db = temp_db("loomlog_sqlite_store_version.db");
+    remove_db(db);
+
+    {
+        loom::SqliteStore store;
+        store.open(db);
+        EXPECT_EQ(store.schema_version(), 1);
+    }
+
+    {
+        // 重新打开继续保持版本号
+        loom::SqliteStore store;
+        store.open(db);
+        EXPECT_EQ(store.schema_version(), 1);
+    }
+}
+
+TEST(SqliteStoreTest, DetectsUncleanShutdownAndRecoversCleanState) {
+    const auto db = temp_db("loomlog_sqlite_store_crash.db");
+    remove_db(db);
+
+    {
+        loom::SqliteStore store;
+        store.open(db);
+        EXPECT_TRUE(store.is_clean_shutdown());
+
+        // 模拟开始写入事务并记录 syncing 状态，随后未正常 commit 就崩溃关机
+        store.set_build_status("syncing");
+        EXPECT_FALSE(store.is_clean_shutdown());
+    }
+
+    {
+        // 崩溃后重新打开，检测到非干净退出，执行自愈恢复
+        loom::SqliteStore store;
+        store.open(db);
+        EXPECT_FALSE(store.is_clean_shutdown());
+        EXPECT_EQ(store.build_status(), "syncing");
+
+        EXPECT_TRUE(store.recover_clean_state());
+        EXPECT_TRUE(store.is_clean_shutdown());
+        EXPECT_EQ(store.build_status(), "ready");
+
+        // 再次恢复返回 false（因为已经是 clean）
+        EXPECT_FALSE(store.recover_clean_state());
+    }
+}
