@@ -28,7 +28,7 @@ FileResult FileProcessor::process(const std::filesystem::path& path) const {
 
     const auto text = content.str();
     result.bytes = text.size();
-    result.words = tokenize_words(text);
+    result.words = tokenize_with_frequency(text);
     result.success = true;
     return result;
 }

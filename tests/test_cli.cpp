@@ -180,3 +180,95 @@ TEST(CliTest, BenchmarkWithOneTermHasNoAndQueries) {
     EXPECT_NE(benchmark.find("hand_and_p50_ns: 0\n"), std::string::npos);
     EXPECT_NE(benchmark.find("parity_mismatches: 0"), std::string::npos);
 }
+
+TEST(CliTest, QueryWithLimitRestrictsNumberOfMatches) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_limit_docs";
+    const auto index_path = std::filesystem::temp_directory_path() / "loomsearch_cli_limit_index.bin";
+    const auto output = root / "query.out";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "doc1.txt") << "common keyword";
+    std::ofstream(root / "doc2.txt") << "common keyword";
+    std::ofstream(root / "doc3.txt") << "common keyword";
+
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    const auto index_command = cmd_wrap(
+        cli + " index " + quote(root) + " --threads 1 --output " + quote(index_path)
+    );
+    ASSERT_EQ(std::system(index_command.c_str()), 0);
+
+    const auto query_command = cmd_wrap(
+        cli + " query " + quote(index_path) + " common --limit 2 > " + quote(output)
+    );
+    ASSERT_EQ(std::system(query_command.c_str()), 0);
+
+    const auto text = read_file(output);
+    EXPECT_NE(text.find("matches: 2"), std::string::npos);
+}
+
+TEST(CliTest, QueryWithTypeFiltersByExtension) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_type_docs";
+    const auto index_path = std::filesystem::temp_directory_path() / "loomsearch_cli_type_index.bin";
+    const auto output = root / "query.out";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "code.cpp") << "common thread";
+    std::ofstream(root / "readme.md") << "common thread";
+
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    const auto index_command = cmd_wrap(
+        cli + " index " + quote(root) + " --threads 1 --output " + quote(index_path)
+    );
+    ASSERT_EQ(std::system(index_command.c_str()), 0);
+
+    const auto query_command = cmd_wrap(
+        cli + " query " + quote(index_path) + " common --type .cpp > " + quote(output)
+    );
+    ASSERT_EQ(std::system(query_command.c_str()), 0);
+
+    const auto text = read_file(output);
+    EXPECT_NE(text.find("matches: 1"), std::string::npos);
+    EXPECT_NE(text.find("code.cpp"), std::string::npos);
+    EXPECT_EQ(text.find("readme.md"), std::string::npos);
+}
+
+TEST(CliTest, SqliteQuerySupportsLimitAndType) {
+    const auto root = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_limit_docs";
+    const auto db_path = std::filesystem::temp_directory_path() / "loomsearch_cli_sqlite_limit.db";
+    const auto output = root / "query.out";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "code.cpp") << "search engine";
+    std::ofstream(root / "note.txt") << "search engine";
+
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    const auto index_command = cmd_wrap(
+        cli + " sqlite-index " + quote(root) + " --output " + quote(db_path)
+    );
+    ASSERT_EQ(std::system(index_command.c_str()), 0);
+
+    const auto query_command = cmd_wrap(
+        cli + " sqlite-query " + quote(db_path) + " search --type .txt --limit 1 > " + quote(output)
+    );
+    ASSERT_EQ(std::system(query_command.c_str()), 0);
+
+    const auto text = read_file(output);
+    EXPECT_NE(text.find("matches: 1"), std::string::npos);
+    EXPECT_NE(text.find("note.txt"), std::string::npos);
+    EXPECT_EQ(text.find("code.cpp"), std::string::npos);
+}
+
+TEST(CliTest, QueryWithInvalidArgsReturnsNonZero) {
+    const std::string cli = quote(LOOMSEARCH_CLI_PATH);
+    // 缺少查询关键词
+    const auto cmd_no_keyword = cmd_wrap(cli + " query non_existent_index.bin");
+    EXPECT_NE(std::system(cmd_no_keyword.c_str()), 0);
+
+    // --limit 传了非法值 0
+    const auto cmd_invalid_limit = cmd_wrap(cli + " query dummy.bin keyword --limit 0");
+    EXPECT_NE(std::system(cmd_invalid_limit.c_str()), 0);
+
+    // 索引文件不存在
+    const auto cmd_missing_file = cmd_wrap(cli + " query non_existent_file.bin keyword");
+    EXPECT_NE(std::system(cmd_missing_file.c_str()), 0);
+}

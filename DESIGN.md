@@ -38,19 +38,19 @@ CLI
 
 `index` 命令负责递归扫描目录，把每个支持的文件提交给线程池处理。worker 读取文件、分词并返回 `FileResult`。主线程拿到 future 后统一合并到 `InvertedIndex`，最后通过 `IndexStore` 保存到磁盘。
 
-`query` 命令负责加载磁盘索引，把输入关键词归一化后交给 `QueryEngine` 查询。多个关键词使用 AND 语义，只有同时包含所有关键词的文档才会返回。
+`query` 命令负责加载磁盘索引，把输入关键词归一化后交给 `QueryEngine` 查询。多个关键词使用 AND 语义，计算每个候选文档的 TF-IDF 综合相关度得分，并按得分降序、路径字典序升序进行稳定输出，支持通过 `--limit` 和 `--type` 过滤。
 
-`sqlite-index` 复用同样的扫描和线程池，但 worker 只读原文、不做分词，主线程在一个事务里把全文插入 FTS5 表。`sqlite-query` 走 FTS5 的 `MATCH`，支持 BM25 排名、短语和前缀查询。
+`sqlite-index` 复用同样的扫描和线程池，但 worker 只读原文、不做分词，主线程在一个事务里把全文插入 FTS5 表。`sqlite-query` 走 FTS5 的 `MATCH`，支持 BM25 排名、短语、前缀查询以及 `--limit` 和 `--type` 过滤。
 
 ## 模块职责
 
 - `ThreadPool`：执行文件读取和解析任务，提供固定数量 worker。
 - `DirectoryScanner`：递归遍历目录，只返回 `.txt`、`.md`、`.cpp`、`.hpp` 文件。
-- `FileProcessor`：读取文件内容，统计字节数，执行分词，返回 `FileResult`。
-- `TextAnalyzer`：提供 ASCII 分词和查询词归一化，保证索引和查询使用同一套规则。
-- `InvertedIndex`：维护 `keyword -> document list` 映射。
+- `FileProcessor`：读取文件内容，统计字节数，提取词频字典，返回 `FileResult`。
+- `TextAnalyzer`：提供 ASCII 分词、词频统计和查询词归一化，保证索引和查询规则一致。
+- `InvertedIndex`：维护 `keyword -> posting(doc list, tf map)` 倒排映射。
 - `IndexStore`：保存和加载索引文件。
-- `QueryEngine`：执行单关键词查询和多关键词 AND 查询。
+- `QueryEngine`：执行单/多关键词 AND 检索，计算 TF-IDF 评分并执行稳定排序。
 - `SqliteStore`：封装 SQLite FTS5 的建表、批量入库和 `MATCH` 查询，`path` 只存不索引、`content` 参与检索。
 - `Indexer`：编排扫描、线程池任务提交、结果收集、索引合并和统计。
 - `Logger`：记录索引任务开始、文件处理、失败、完成和耗时。
@@ -62,7 +62,7 @@ CLI
 ```cpp
 struct FileResult {
     std::string path;
-    std::unordered_set<std::string> words;
+    std::unordered_map<std::string, std::size_t> words;  // word -> 词频 (TF)
     std::size_t bytes{0};
     bool success{false};
     std::string error;
@@ -72,10 +72,14 @@ struct FileResult {
 倒排索引：
 
 ```cpp
-std::unordered_map<std::string, std::vector<std::string>>
+struct PostingList {
+    std::vector<std::string> docs;                    // 文档路径列表
+    std::unordered_map<std::string, std::size_t> tf;  // path -> 词频 (TF)
+};
+std::unordered_map<std::string, PostingList> index_;
 ```
 
-第一版不保存词频、位置和排名分数。一个关键词只对应包含它的文件路径列表。
+系统在构建期记录每个文档内关键词出现的频次（TF），查询期结合总文档数 $N$ 与文档频率 $\text{df}$ 计算 TF-IDF 评分。排序算法以相关度为第一关键字、路径字典序为第二关键字，保证结果稳定确定。
 
 ## 并发边界
 
@@ -201,12 +205,45 @@ parity_mismatches: 0
 
 说明：手写后端的查询是内存热路径，SQLite 后端是磁盘上的 FTS5，所以单条查询前者快是预期结果；`parity_mismatches: 0` 说明两者在 ASCII 单词查询上返回相同结果集。
 
+## 手写后端 vs SQLite FTS5 后端差异对照
+
+本项目刻意实现了两个检索后端，用于在工程实践中对比「自研基础构件」与「工业级现成方案」的取舍：
+
+### 1. 功能特性与能力矩阵
+
+| 功能维度 | 手写倒排索引后端 (`loomsearch query`) | SQLite FTS5 后端 (`loomsearch sqlite-query`) |
+|---|---|---|
+| **核心定位** | 极致轻量、内存热路径、逻辑完全透明可控、教学与算法验证 | 功能完备、工业级生产可用、强事务与持久化保证 |
+| **查询模型** | 纯布尔交集（隐式多词 AND） | 丰富 MATCH 语法（AND / OR / NOT / 短语 / 前缀） |
+| **分词实现** | 手写 ASCII 字母数字分词（简单、无外部依赖） | 内置 Unicode61 分词器（支持多语言及音调处理） |
+| **位置信息** | 不保存（仅记录文档词频 TF） | 默认记录精确 Token 偏移与位置（支持短语相邻匹配） |
+| **排序机制** | **TF-IDF**（结合词频与标准平滑逆文档频率） | **BM25**（工业级标准：包含词频饱和与文档长度归一化） |
+| **排序稳定性**| **绝对稳定**（得分降序 + 路径字典序 Tie-breaker） | **稳定**（BM25 降序） |
+| **过滤选项** | `--limit N` 数量限制、`--type EXT` 后缀过滤 | `--limit N` 数量限制、`--type EXT` 后缀过滤 |
+| **更新能力** | 全量重建（修改文件需重新执行全量索引） | 增量维护（基于 `file_states` 元数据表与时间戳感知） |
+| **并发边界** | worker 分词返回 `FileResult`，主线程统一合并 | worker 仅读原文，主线程单事务批量入库 |
+
+### 2. 排序算法差异：TF-IDF vs BM25
+
+- **手写后端（平滑 TF-IDF）**：
+  $$\text{score}(d) = \sum_{t} \text{tf}(t, d) \times \ln\Bigl(1.0 + \frac{N}{\text{df}(t)}\Bigr)$$
+  特点是逻辑直观线性，词频越高权重线性增加；平滑项避免了全集词 IDF 退化为 0。
+- **SQLite 后端（BM25）**：
+  在 TF-IDF 基础上解决了两大工业缺陷：
+  1. **词频饱和度（$k_1$ 参数）**：当某个词在同一文档中出现 100 次时，其相关度并不应该是出现 1 次的 100 倍。BM25 将 TF 限制在渐进渐平的饱和曲线上。
+  2. **文档长度归一化（$b$ 参数）**：大文档包含更多词是天然的，BM25 根据文档实际长度与语料平均长度的比值进行惩罚，防止大文件天然占便宜。
+
+### 3. 性能特征与 Benchmark 成因分析
+
+在 2000 个文档合成语料的基准测试中：
+- **建库耗时**：SQLite FTS5 略快于手写文本索引构建。原因是主线程通过显式 `BEGIN TRANSACTION` 将多文件插入合并为单次 WAL 顺序写入，且内部使用高效的变长字节压缩编码；
+- **磁盘占用**：SQLite 数据库体积明显小于手写文本 `.bin` 文件。因为手写后端使用直观换行的可读文本格式存储路径与词条，而 FTS5 内部采用了前缀压缩与 Delta 编码的 B-Tree 页；
+- **查询延时**：手写后端在内存热路径上的单词与多词查询（微秒级）显著快于 SQLite。因为手写后端全部数据在 `InvertedIndex` 哈希表与 `vector` 中，无需经过 SQL 解析、虚拟表回调以及 SQLite VDBE 字节码引擎调度。
+
 ## 后续方向
 
 后续只有在测试和 benchmark 给出明确需求后才扩展：
 
-- 保存词频以支持排序。
-- 保存文件更新时间以支持增量索引。
-- 更紧凑的二进制格式。
-- 更细的错误分类。
+- 增量手写索引（引入元数据状态与差异比对）。
+- 更紧凑的手写二进制或压缩索引格式。
 - 大目录 benchmark 和 TSan 常态化验证。
