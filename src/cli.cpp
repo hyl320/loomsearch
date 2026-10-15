@@ -332,27 +332,104 @@ int run_index(int argc, char* argv[]) {
     return result.stats.files_failed == 0 ? 0 : 1;
 }
 
-int run_query(int argc, char* argv[]) {
+struct QueryCliOptions {
+    std::string query_text;
+    std::size_t limit{0};
+    std::unordered_set<std::string> types;
+};
+
+QueryCliOptions parse_query_options(int argc, char* argv[], std::string_view command_name) {
     if (argc < 4) {
-        throw std::invalid_argument("query requires an index file and keywords");
+        throw std::invalid_argument(std::string(command_name) + " requires a target file and keywords");
     }
 
-    const std::filesystem::path index_path(argv[2]);
-    std::ostringstream query_text;
+    QueryCliOptions options;
+    std::ostringstream query_words;
+
     for (int i = 3; i < argc; ++i) {
-        if (i > 3) {
-            query_text << ' ';
+        const std::string_view arg(argv[i]);
+        if (arg == "--limit") {
+            if (i + 1 >= argc) {
+                throw std::invalid_argument("--limit requires a value");
+            }
+            options.limit = parse_size(argv[++i], "--limit");
+        } else if (arg == "--type") {
+            if (i + 1 >= argc) {
+                throw std::invalid_argument("--type requires a value");
+            }
+            const std::string val(argv[++i]);
+            std::stringstream ss(val);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+                while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+                if (item.empty()) continue;
+                if (!item.starts_with('.')) {
+                    item = "." + item;
+                }
+                std::ranges::transform(item, item.begin(), [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+                options.types.insert(item);
+            }
+        } else if (arg.starts_with("--")) {
+            throw std::invalid_argument("unknown option for " + std::string(command_name) + ": " + std::string(arg));
+        } else {
+            if (query_words.tellp() > 0) {
+                query_words << ' ';
+            }
+            query_words << arg;
         }
-        query_text << argv[i];
+    }
+
+    options.query_text = query_words.str();
+    if (options.query_text.empty()) {
+        throw std::invalid_argument(std::string(command_name) + " requires at least one keyword");
+    }
+
+    return options;
+}
+
+bool matches_type_filter(const std::string& path, const std::unordered_set<std::string>& types) {
+    if (types.empty()) {
+        return true;
+    }
+    auto ext = std::filesystem::path(path).extension().string();
+    std::ranges::transform(ext, ext.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return types.contains(ext);
+}
+
+int run_query(int argc, char* argv[]) {
+    const auto options = parse_query_options(argc, argv, "query");
+
+    const std::filesystem::path index_path(argv[2]);
+    if (!std::filesystem::exists(index_path)) {
+        throw std::invalid_argument("index file does not exist: " + index_path.string());
     }
 
     const auto index = loom::IndexStore{}.load(index_path);
-    const auto matches = loom::QueryEngine{}.query(index, query_text.str());
+    auto matches = loom::QueryEngine{}.query(index, options.query_text);
+
+    if (!options.types.empty()) {
+        std::vector<loom::QueryResult> filtered;
+        for (auto& match : matches) {
+            if (matches_type_filter(match.path, options.types)) {
+                filtered.push_back(std::move(match));
+            }
+        }
+        matches = std::move(filtered);
+    }
+
+    if (options.limit > 0 && matches.size() > options.limit) {
+        matches.resize(options.limit);
+    }
 
     // 输出保持简单稳定，便于脚本消费和测试断言。
     std::cout << "matches: " << matches.size() << '\n';
     for (const auto& match : matches) {
-        std::cout << match << '\n';
+        std::cout << match.path << '\n';
     }
 
     return 0;
@@ -409,22 +486,30 @@ int run_sqlite_index(int argc, char* argv[]) {
 }
 
 int run_sqlite_query(int argc, char* argv[]) {
-    if (argc < 4) {
-        throw std::invalid_argument("sqlite-query requires a database file and keywords");
-    }
+    const auto options = parse_query_options(argc, argv, "sqlite-query");
 
     const std::filesystem::path db_path(argv[2]);
-    std::ostringstream query_text;
-    for (int i = 3; i < argc; ++i) {
-        if (i > 3) {
-            query_text << ' ';
-        }
-        query_text << argv[i];
+    if (!std::filesystem::exists(db_path)) {
+        throw std::invalid_argument("database file does not exist: " + db_path.string());
     }
 
     loom::SqliteStore store;
     store.open(db_path);
-    const auto hits = store.search(query_text.str());
+    auto hits = store.search(options.query_text);
+
+    if (!options.types.empty()) {
+        std::vector<loom::SqliteSearchHit> filtered;
+        for (auto& hit : hits) {
+            if (matches_type_filter(hit.path, options.types)) {
+                filtered.push_back(std::move(hit));
+            }
+        }
+        hits = std::move(filtered);
+    }
+
+    if (options.limit > 0 && hits.size() > options.limit) {
+        hits.resize(options.limit);
+    }
 
     // 结果已经按 BM25 相关度排序，输出保持稳定便于脚本消费和测试断言。
     std::cout << "matches: " << hits.size() << '\n';
@@ -595,7 +680,10 @@ int run_bench_search(int argc, char* argv[]) {
             sqlite_query_us += sqlite_ns / 1000;
         }
 
-        const std::set<std::string> hand_set(hand_hits.begin(), hand_hits.end());
+        std::set<std::string> hand_set;
+        for (const auto& hit : hand_hits) {
+            hand_set.insert(hit.path);
+        }
         std::set<std::string> sqlite_set;
         for (const auto& hit : sqlite_hits) {
             sqlite_set.insert(hit.path);
@@ -638,9 +726,9 @@ int run_bench_search(int argc, char* argv[]) {
 void print_usage() {
     std::cout << "usage:\n";
     std::cout << "  loomsearch index <directory> [--threads N] [--output PATH]\n";
-    std::cout << "  loomsearch query <index-file> <keywords...>\n";
+    std::cout << "  loomsearch query <index-file> <keywords...> [--limit N] [--type EXT]\n";
     std::cout << "  loomsearch sqlite-index <directory> [--threads N] [--output PATH]\n";
-    std::cout << "  loomsearch sqlite-query <db-file> <query...>\n";
+    std::cout << "  loomsearch sqlite-query <db-file> <query...> [--limit N] [--type EXT]\n";
     std::cout << "  loomsearch corpus-gen <directory> [--files N] [--words N]\n";
     std::cout << "  loomsearch bench-search <directory> [--threads N] [--queries N]\n";
     std::cout << "  loomsearch bench-pool [--threads N] [--jobs N]\n";

@@ -28,6 +28,9 @@ TEST(FileProcessorTest, ReadsTextAndExtractsLowercaseWords) {
     EXPECT_TRUE(result.words.contains("thread"));
     EXPECT_TRUE(result.words.contains("pool"));
     EXPECT_TRUE(result.words.contains("logger"));
+    EXPECT_EQ(result.words.at("thread"), 2u);
+    EXPECT_EQ(result.words.at("pool"), 1u);
+    EXPECT_EQ(result.words.at("logger"), 1u);
 }
 
 TEST(FileProcessorTest, CountsBytesFromFileContent) {

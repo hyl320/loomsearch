@@ -6,7 +6,7 @@ namespace loom {
 
 void InvertedIndex::add_document(
     const std::string& path,
-    const std::unordered_set<std::string>& words
+    const std::unordered_map<std::string, std::size_t>& words
 ) {
     if (path.empty()) {
         return;
@@ -14,17 +14,61 @@ void InvertedIndex::add_document(
 
     documents_.insert(path);
 
-    for (const auto& word : words) {
-        if (word.empty()) {
+    for (const auto& [word, count] : words) {
+        if (word.empty() || count == 0) {
             continue;
         }
 
         auto& posting = index_[word];
-        // O(1) 去重；首次出现才追加，构建期不再排序
-        if (posting.seen.insert(path).second) {
+        // O(1) 去重并记录/累加 TF；首次出现才追加到 docs 列表，构建期不再排序
+        const auto [it, inserted] = posting.tf.emplace(path, count);
+        if (inserted) {
             posting.docs.push_back(path);
+        } else {
+            it->second += count;
         }
     }
+}
+
+void InvertedIndex::add_document(
+    const std::string& path,
+    const std::unordered_set<std::string>& words
+) {
+    std::unordered_map<std::string, std::size_t> freq;
+    freq.reserve(words.size());
+    for (const auto& word : words) {
+        freq.emplace(word, 1);
+    }
+    add_document(path, freq);
+}
+
+void InvertedIndex::add_document(
+    const std::string& path,
+    std::initializer_list<std::string> words
+) {
+    std::unordered_map<std::string, std::size_t> freq;
+    freq.reserve(words.size());
+    for (const auto& word : words) {
+        ++freq[word];
+    }
+    add_document(path, freq);
+}
+
+std::size_t InvertedIndex::term_frequency(
+    const std::string& word,
+    const std::string& path
+) const {
+    const auto it = index_.find(word);
+    if (it == index_.end()) {
+        return 0;
+    }
+
+    const auto tf_it = it->second.tf.find(path);
+    if (tf_it == it->second.tf.end()) {
+        return 0;
+    }
+
+    return tf_it->second;
 }
 
 std::vector<std::string> InvertedIndex::find(const std::string& word) const {
