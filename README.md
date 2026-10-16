@@ -4,7 +4,7 @@ LoomSearch 是一个基于 C++20 线程池的并行文件索引器：递归扫�
 
 ## 支持范围
 
-第一版只索引这些文件：
+默认只索引这些文件：
 
 ```text
 .txt
@@ -37,16 +37,19 @@ build/loomsearch         # Linux / macOS
 
 ```text
 loomsearch index <目录> [--threads N] [--output PATH]        # 手写倒排索引 (全量构建)
-loomsearch query <索引文件> <关键词...>                       # 多关键词 AND 查询
+loomsearch query <索引文件> <关键词...> [--limit N] [--type EXT] # 多关键词 AND + TF-IDF 排名查询
 loomsearch sqlite-index <目录> [--threads N] [--output PATH] # FTS5 增量建库 (单次批量)
-loomsearch sqlite-query <数据库> <查询...>                    # FTS5 查询（BM25/短语/前缀）
+loomsearch sqlite-query <数据库> <查询...> [--limit N] [--type EXT] # FTS5 查询（BM25/短语/前缀）
 loomsearch watch <目录> <数据库> [--debounce MS] [--max-size MB]        # 实时常驻监控与自动增量更新
 loomsearch sqlite-watch <目录> <数据库> [--debounce MS] [--max-size MB] # 实时监控对等别名
 loomsearch corpus-gen <目录> [--files N] [--words N]         # 生成确定性 benchmark 语料
 loomsearch bench-search <目录> [--threads N] [--queries N]   # 对比两个检索后端
+loomsearch bench-pool [--threads N] [--jobs N]               # 线程池吞吐微基准
+loomsearch bench-log [--messages N] [--file PATH]            # 异步日志写入微基准
+loomsearch grep --file PATH [--keyword TEXT] [--level LEVEL] # 按关键词/级别过滤日志文件
 ```
 
-运行 `loomsearch --help` 可查看全部命令和参数。
+运行 `loomsearch --help` 可查看全部命令和参数。更详细的查询语法与错误提示说明参见 [docs/QUERY_SYNTAX.md](docs/QUERY_SYNTAX.md)。
 
 ### 手写后端：index / query
 
@@ -56,10 +59,20 @@ loomsearch bench-search <目录> [--threads N] [--queries N]   # 对比两个检
 .\build\loomsearch.exe index .\documents --threads 8 --output .\index.bin
 ```
 
-查询：
+查询（支持多词隐式 AND、TF-IDF 相关度排序、文件类型过滤与条数限制）：
 
 ```powershell
-.\build\loomsearch.exe query .\index.bin "thread pool"
+# 基础多词查询（自动按 TF-IDF 相关度从高到低排序，同分按路径稳定排列）
+.\build\loomsearch.exe query .\index.bin thread pool
+
+# 限制最多返回 3 条最相关结果
+.\build\loomsearch.exe query .\index.bin thread --limit 3
+
+# 仅检索特定文件类型（如 .cpp 文件）
+.\build\loomsearch.exe query .\index.bin thread --type .cpp
+
+# 组合使用：过滤类型且限制返回条数
+.\build\loomsearch.exe query .\index.bin thread pool --type .txt,.md --limit 5
 ```
 
 输出示例：
@@ -69,13 +82,17 @@ matches: 1
 documents/thread_pool.md
 ```
 
-多个关键词使用 AND 语义：`thread pool` 只返回同时包含 `thread` 和 `pool` 的文件。
-
 ### SQLite FTS5 后端：sqlite-index / sqlite-query
 
 ```powershell
 .\build\loomsearch.exe sqlite-index .\documents --threads 8 --output .\index.db
 .\build\loomsearch.exe sqlite-query .\index.db "thread pool"
+```
+
+同样支持 `--limit` 与 `--type` 过滤：
+
+```powershell
+.\build\loomsearch.exe sqlite-query .\index.db "thread pool" --type .md --limit 5
 ```
 
 `sqlite-index` 将文件状态（路径、大小、修改时间、内容 hash）和 FTS5 文档保存在同一个数据库：首次执行建立完整索引；后续执行跳过未变化文件，只读取新增或修改文件，并删除已经从目录消失的文档。数据库会绑定首次使用的规范化绝对目录；用不同目录复用同一个数据库会被拒绝，避免误删原索引。
@@ -130,7 +147,7 @@ SQLite FTS5 后端:
 
 ## 测试与质量
 
-运行全部测试（共 95 项自动化测试全部通过）：
+运行全部测试（共 95 项）：
 
 ```powershell
 ctest --test-dir build --output-on-failure
@@ -142,11 +159,11 @@ ctest --test-dir build --output-on-failure
 .\build\test_cli.exe
 ```
 
-CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan；本地全套 95 项测试均 100% 通过。
+CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan。Windows 本机验证中，文件监听测试 `ContinuousIndexerTest.AutoIndexesNewFiles` 偶尔因事件时序竞争失败；单独重复运行通常通过，其余测试稳定通过。
 
 ## Benchmark
 
-`corpus-gen` 使用固定字典 + 线性同余发生器生成语料，相同参数输出完全确定；`bench-search` 用同一批文件对比手写索引和 FTS5 的构建耗时、索引体积与查询耗时，并核对结果集是否一致（`parity_mismatches`）。
+`corpus-gen` 使用固定字典 + 线性同余发生器生成语料，相同参数输出完全确定；`bench-search` 用同一批文件对比手写索引和 FTS5 的构建耗时、索引体积与查询耗时，并核对结果集是否一致（`parity_mismatches`）。查询耗时现在额外输出单词语句和双词 AND 的 p50/p95 纳秒分位数。
 
 一键复现：
 
@@ -155,7 +172,13 @@ CI（`.github/workflows/ci.yml`）在 Linux 上跑 ASan+UBSan 与 TSan；本地�
 .\build\loomsearch.exe bench-search .\out\corpus --threads 4 --queries 30
 ```
 
-或直接运行 `scripts/benchmark.ps1`（Linux/macOS 用 `scripts/benchmark.sh`）。
+或直接运行矩阵脚本 `scripts/benchmark.ps1`（Linux/macOS 用 `scripts/benchmark.sh`）。它会组合不同文件数、每文件词数和线程数，重复运行并采集手写/SQLite 两条后端的构建耗时、查询 p50/p95 和峰值工作集，结果写入 CSV：
+
+```powershell
+.\scripts\benchmark.ps1 -Bin .\build\loomsearch.exe -Corpus .\out\benchmark-corpora -Output .\out\benchmark.csv
+```
+
+阶段一的优化前后对比、结论与限制记录在 [docs/benchmarks/phase-1.md](docs/benchmarks/phase-1.md)。注意：脚本里的 `first`/`repeat` 只表示同语料下的首次与后续进程，并非严格清空 OS 文件缓存后的冷/热缓存测量。
 
 本机一次运行（Intel64 Family 6 Model 154，4 线程，30 个查询，结果只用于观察量级、不做跨机器结论）：
 
@@ -167,6 +190,10 @@ parity_mismatches: 0
 
 ## 设计取舍
 
-详见 [DESIGN.md](DESIGN.md)。核心结论：手写索引胜在无依赖、可解释、单条查询快；SQLite FTS5 胜在构建更快、磁盘更小，并提供 BM25 排名、短语和前缀查询。二者并存，benchmark 才能对比「自研轮子」与「工业级方案」的真实取舍。
+- worker 只读取、分词并返回 `FileResult`，主线程统一合并到 `InvertedIndex`。共享索引本身不需要加锁，并发边界清晰，也更容易通过 TSan。
+- 手写后端和 SQLite FTS5 后端并存：手写索引胜在无依赖、可解释、内存热路径查询快；FTS5 胜在构建更快、磁盘更小，并提供 BM25、短语和前缀查询。两者在同一语料上返回相同结果集，benchmark 才能真实对比「自研轮子」和「工业级方案」的取舍。
+- 手写后端用平滑 TF-IDF 排序，FTS5 用 BM25。BM25 额外引入词频饱和与文档长度归一化，避免高频词和大文档天然占便宜。
+- 手写索引持久化采用影子临时文件刷盘后再原子 rename，防止进程中途退出损坏旧索引；SQLite 后端用 WAL 事务批量写入，并记录 `schema_version` / `build_status` 用于异常恢复。
+- `watch` 链路为 `FileWatcher -> EventDebouncer -> ContinuousIndexer -> SqliteStore`：原生 OS 事件被防抖合并后批量更新，普通文件用只读 mmap 零拷贝分词，超过 `--max-size` 的文件跳过，避免 OOM。
 
 术语解释见 [GLOSSARY.md](GLOSSARY.md)。
