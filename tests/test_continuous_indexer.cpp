@@ -44,6 +44,9 @@ TEST(ContinuousIndexerTest, AutoIndexesNewFiles) {
 
     ASSERT_TRUE(indexer.start(options));
 
+    // 确保后台 watcher 线程已进入就绪监听状态
+    std::this_thread::sleep_for(100ms);
+
     // 1. 在目录下创建新文件
     const auto file_path = dir / "first.txt";
     {
@@ -51,15 +54,18 @@ TEST(ContinuousIndexerTest, AutoIndexesNewFiles) {
         file << "apple banana cherry";
     }
 
-    // 等待后台自动处理
-    bool found = poll_until([&]() {
-        loom::SqliteStore store;
-        store.open(db_path);
-        return !store.search("banana").empty();
+    // 等待后台自动处理（通过线程安全的 stats 轮询，消除主线程并发 open 导致 SQLite WAL 竞争）
+    bool indexed = poll_until([&]() {
+        return indexer.stats().files_indexed >= 1;
     });
+    EXPECT_TRUE(indexed);
 
-    EXPECT_TRUE(found);
     indexer.stop();
+
+    // 停止后台写入后，主线程单连接打开数据库校验搜索结果
+    loom::SqliteStore store;
+    store.open(db_path);
+    EXPECT_FALSE(store.search("banana").empty());
 }
 
 TEST(ContinuousIndexerTest, AutoReindexesModifiedFiles) {
@@ -80,12 +86,8 @@ TEST(ContinuousIndexerTest, AutoReindexesModifiedFiles) {
 
     ASSERT_TRUE(indexer.start(options));
 
-    // 验证初始状态可被检索
-    {
-        loom::SqliteStore store;
-        store.open(db_path);
-        EXPECT_FALSE(store.search("draft").empty());
-    }
+    // 记录初始基线索引计数
+    const auto initial_indexed = indexer.stats().files_indexed;
 
     // 2. 修改文件内容，替换关键词
     std::this_thread::sleep_for(100ms);
@@ -95,13 +97,17 @@ TEST(ContinuousIndexerTest, AutoReindexesModifiedFiles) {
     }
 
     bool updated = poll_until([&]() {
-        loom::SqliteStore store;
-        store.open(db_path);
-        return store.search("draft").empty() && !store.search("publication").empty();
+        return indexer.stats().files_indexed > initial_indexed;
     });
-
     EXPECT_TRUE(updated);
+
     indexer.stop();
+
+    // 验证旧词被清空，新词已入库
+    loom::SqliteStore store;
+    store.open(db_path);
+    EXPECT_TRUE(store.search("draft").empty());
+    EXPECT_FALSE(store.search("publication").empty());
 }
 
 TEST(ContinuousIndexerTest, AutoRemovesDeletedFiles) {
@@ -122,24 +128,21 @@ TEST(ContinuousIndexerTest, AutoRemovesDeletedFiles) {
 
     ASSERT_TRUE(indexer.start(options));
 
-    {
-        loom::SqliteStore store;
-        store.open(db_path);
-        EXPECT_EQ(store.document_count(), 1u);
-    }
-
     // 3. 删除文件
     std::this_thread::sleep_for(100ms);
     std::filesystem::remove(file_path);
 
     bool removed = poll_until([&]() {
-        loom::SqliteStore store;
-        store.open(db_path);
-        return store.document_count() == 0u && store.search("doomed").empty();
+        return indexer.stats().files_removed >= 1;
     });
-
     EXPECT_TRUE(removed);
+
     indexer.stop();
+
+    loom::SqliteStore store;
+    store.open(db_path);
+    EXPECT_EQ(store.document_count(), 0u);
+    EXPECT_TRUE(store.search("doomed").empty());
 }
 
 TEST(ContinuousIndexerTest, CollapsesRapidModificationsIntoSingleUpdate) {
@@ -154,6 +157,7 @@ TEST(ContinuousIndexerTest, CollapsesRapidModificationsIntoSingleUpdate) {
     options.debounce_delay = 100ms;
 
     ASSERT_TRUE(indexer.start(options));
+    const auto initial_indexed = indexer.stats().files_indexed;
 
     // 4. 短时间内连续修改 4 次
     for (int i = 0; i < 4; ++i) {
@@ -163,19 +167,15 @@ TEST(ContinuousIndexerTest, CollapsesRapidModificationsIntoSingleUpdate) {
     }
 
     bool finished = poll_until([&]() {
-        loom::SqliteStore store;
-        store.open(db_path);
-        return !store.search("number").empty();
+        return indexer.stats().files_indexed > initial_indexed;
     });
-
     EXPECT_TRUE(finished);
 
-    // 最终搜索结果包含最新的 "3"
-    {
-        loom::SqliteStore store;
-        store.open(db_path);
-        EXPECT_FALSE(store.search("3").empty());
-    }
-
     indexer.stop();
+
+    // 最终搜索结果包含最新的 "3" 与 "number"
+    loom::SqliteStore store;
+    store.open(db_path);
+    EXPECT_FALSE(store.search("number").empty());
+    EXPECT_FALSE(store.search("3").empty());
 }
