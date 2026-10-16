@@ -146,6 +146,18 @@ void SqliteStore::open(const std::filesystem::path& path) {
         "key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         "cannot create index metadata table"
     );
+    const int version = schema_version();
+    if (version == 0) {
+        Statement ver_stmt(
+            impl_->db,
+            "INSERT OR REPLACE INTO index_metadata(key, value) VALUES('schema_version', '1');",
+            "cannot init schema version"
+        );
+        ver_stmt.step_done("cannot save schema version");
+    } else if (version > kCurrentSchemaVersion) {
+        throw std::runtime_error("unsupported sqlite index schema version: " + std::to_string(version));
+    }
+
     impl_->insert_statement = std::make_unique<Statement>(
         impl_->db,
         "INSERT INTO documents(path, content) VALUES(?1, ?2);",
@@ -167,6 +179,10 @@ void SqliteStore::begin_transaction() {
 
 void SqliteStore::commit_transaction() {
     exec_or_throw(impl_->db, "COMMIT;", "cannot commit transaction");
+}
+
+void SqliteStore::rollback_transaction() {
+    exec_or_throw(impl_->db, "ROLLBACK;", "cannot rollback transaction");
 }
 
 void SqliteStore::insert(std::string_view path, std::string_view content) {
@@ -320,6 +336,60 @@ std::size_t SqliteStore::document_count() const {
         throw_db_error(impl_->db, "cannot count documents");
     }
     return static_cast<std::size_t>(sqlite3_column_int64(statement.get(), 0));
+}
+
+int SqliteStore::schema_version() const {
+    Statement statement(
+        impl_->db,
+        "SELECT value FROM index_metadata WHERE key = 'schema_version';",
+        "cannot prepare schema version query"
+    );
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) return 0;
+    if (result != SQLITE_ROW) throw_db_error(impl_->db, "cannot read schema version");
+    const auto* val = reinterpret_cast<const char*>(sqlite3_column_text(statement.get(), 0));
+    if (val == nullptr) return 0;
+    try {
+        return std::stoi(val);
+    } catch (...) {
+        return 0;
+    }
+}
+
+void SqliteStore::set_build_status(std::string_view status) {
+    Statement statement(
+        impl_->db,
+        "INSERT INTO index_metadata(key, value) VALUES('build_status', ?1) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        "cannot prepare build status upsert"
+    );
+    statement.bind_text(1, status, "cannot bind build status");
+    statement.step_done("cannot save build status");
+}
+
+std::string SqliteStore::build_status() const {
+    Statement statement(
+        impl_->db,
+        "SELECT value FROM index_metadata WHERE key = 'build_status';",
+        "cannot prepare build status query"
+    );
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) return "ready";
+    if (result != SQLITE_ROW) throw_db_error(impl_->db, "cannot read build status");
+    const auto* status = reinterpret_cast<const char*>(sqlite3_column_text(statement.get(), 0));
+    return status != nullptr ? std::string(status) : "ready";
+}
+
+bool SqliteStore::is_clean_shutdown() const {
+    return build_status() == "ready";
+}
+
+bool SqliteStore::recover_clean_state() {
+    if (!is_clean_shutdown()) {
+        set_build_status("ready");
+        return true;
+    }
+    return false;
 }
 
 }  // namespace loom

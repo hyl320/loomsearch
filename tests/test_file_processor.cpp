@@ -52,3 +52,32 @@ TEST(FileProcessorTest, MissingFileReturnsFailureResult) {
     EXPECT_FALSE(result.success);
     EXPECT_FALSE(result.error.empty());
 }
+
+TEST(FileProcessorTest, EmptyFileSucceedsWithZeroBytes) {
+    const auto dir = fresh_dir("loomsearch_file_processor_empty");
+    const auto path = dir / "empty.txt";
+    std::ofstream(path, std::ios::binary);
+
+    const auto result = loom::FileProcessor{}.process(path);
+
+    ASSERT_TRUE(result.success) << result.error;
+    EXPECT_EQ(result.bytes, 0u);
+    EXPECT_TRUE(result.words.empty());
+}
+
+TEST(FileProcessorTest, RejectsFileExceedingMaxFileSizeLimit) {
+    const auto dir = fresh_dir("loomsearch_file_processor_limit");
+    const auto path = dir / "large.txt";
+    {
+        std::ofstream file(path, std::ios::binary);
+        file << std::string(128, 'x');
+    }
+
+    // 设置最大限制为 64 字节，文件为 128 字节
+    loom::FileProcessor processor(64);
+    const auto result = processor.process(path);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_TRUE(result.error.find("exceeds limit") != std::string::npos) << result.error;
+}
+

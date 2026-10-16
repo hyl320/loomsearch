@@ -42,6 +42,10 @@ add_library(loomlog
   src/query_engine.cpp
   src/sqlite_store.cpp
   src/sqlite_indexer.cpp
+  src/mmap_file.cpp
+  src/event_debouncer.cpp
+  src/file_watcher.cpp
+  src/continuous_indexer.cpp
 )
 add_library(loomlog::loomlog ALIAS loomlog)
 target_compile_features(loomlog PUBLIC cxx_std_20)
@@ -105,6 +109,18 @@ if(LOOMLOG_BUILD_TESTS)
     add_executable(test_sqlite_indexer tests/test_sqlite_indexer.cpp)
     target_link_libraries(test_sqlite_indexer PRIVATE loomlog GTest::gtest_main)
 
+    add_executable(test_mmap_file tests/test_mmap_file.cpp)
+    target_link_libraries(test_mmap_file PRIVATE loomlog GTest::gtest_main)
+
+    add_executable(test_event_debouncer tests/test_event_debouncer.cpp)
+    target_link_libraries(test_event_debouncer PRIVATE loomlog GTest::gtest_main)
+
+    add_executable(test_file_watcher tests/test_file_watcher.cpp)
+    target_link_libraries(test_file_watcher PRIVATE loomlog GTest::gtest_main)
+
+    add_executable(test_continuous_indexer tests/test_continuous_indexer.cpp)
+    target_link_libraries(test_continuous_indexer PRIVATE loomlog GTest::gtest_main)
+
     if(LOOMLOG_BUILD_CLI)
         add_executable(test_cli tests/test_cli.cpp)
         target_link_libraries(test_cli PRIVATE GTest::gtest_main)
@@ -124,6 +140,10 @@ if(LOOMLOG_BUILD_TESTS)
     gtest_discover_tests(test_query_engine)
     gtest_discover_tests(test_sqlite_store)
     gtest_discover_tests(test_sqlite_indexer)
+    gtest_discover_tests(test_mmap_file)
+    gtest_discover_tests(test_event_debouncer)
+    gtest_discover_tests(test_file_watcher)
+    gtest_discover_tests(test_continuous_indexer)
     if(LOOMLOG_BUILD_CLI)
         gtest_discover_tests(test_cli)
     endif()

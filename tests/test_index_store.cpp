@@ -39,3 +39,34 @@ TEST(IndexStoreTest, RejectsMissingIndexFile) {
 
     EXPECT_THROW(loom::IndexStore{}.load(dir / "missing.bin"), std::runtime_error);
 }
+
+TEST(IndexStoreTest, AtomicSaveLeavesNoTemporaryFiles) {
+    const auto dir = std::filesystem::temp_directory_path() / "loomsearch_index_store_atomic";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "index.bin";
+
+    loom::InvertedIndex index;
+    index.add_document("doc.txt", {"atomic", "persistence"});
+
+    loom::IndexStore{}.save(index, path);
+    EXPECT_TRUE(std::filesystem::exists(path));
+
+    // 检查目录内只有目标文件，没有任何残留的 .tmp 文件
+    int count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        EXPECT_EQ(entry.path().filename().string(), "index.bin");
+        ++count;
+    }
+    EXPECT_EQ(count, 1);
+}
+
+TEST(IndexStoreTest, RejectsIncompatibleVersionHeader) {
+    const auto dir = std::filesystem::temp_directory_path() / "loomsearch_index_store_v99";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "index.bin";
+
+    std::ofstream(path) << "LOOMSEARCH_INDEX_V99\n0\n";
+    EXPECT_THROW(loom::IndexStore{}.load(path), std::runtime_error);
+}
